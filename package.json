@@ -1,0 +1,52 @@
+{
+  "name": "ved",
+  "version": "0.1.0",
+  "description": "The personal AI agent that remembers everything and proves it",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "ved": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "lint": "eslint src/",
+    "clean": "rm -rf dist/",
+    "migrate": "node --loader ts-node/esm src/db/migrate.ts",
+    "docker:build": "docker compose build",
+    "docker:test": "docker compose run --rm ved npm run test:run",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down"
+  },
+  "keywords": [
+    "ai-agent",
+    "personal-assistant",
+    "audit-trail",
+    "obsidian",
+    "mcp",
+    "memory"
+  ],
+  "author": "cheenu1092-oss",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cheenu1092-oss/ved"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "ulid": "^2.3.0",
+    "yaml": "^2.6.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

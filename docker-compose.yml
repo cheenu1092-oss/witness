@@ -1,0 +1,25 @@
+services:
+  ved:
+    build: .
+    volumes:
+      - ./src:/app/src
+      - ./test:/app/test
+      - ved-data:/data
+    environment:
+      - VED_DB_PATH=/data/ved.db
+      - NODE_ENV=test
+    command: npm run test:run
+
+  ved-dev:
+    build: .
+    volumes:
+      - ./src:/app/src
+      - ./test:/app/test
+      - ved-data:/data
+    environment:
+      - VED_DB_PATH=/data/ved.db
+      - NODE_ENV=development
+    command: npm run dev
+
+volumes:
+  ved-data:
