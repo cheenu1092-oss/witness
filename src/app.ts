@@ -130,6 +130,9 @@ export class VedApp {
       this.eventLoop.receive(msg);
     });
 
+    // Start vault filesystem watcher → RAG re-index on changes
+    this.startVaultWatcher();
+
     log.info('Ved is running');
 
     // Enter the main event loop (blocks)
@@ -141,6 +144,9 @@ export class VedApp {
    */
   async stop(): Promise<void> {
     log.info('Stopping Ved...');
+
+    // Stop vault watcher
+    this.stopVaultWatcher();
 
     // Stop event loop (completes current message)
     this.eventLoop.requestShutdown();
@@ -181,6 +187,68 @@ export class VedApp {
 
     const healthy = results.every(r => r.healthy);
     return { healthy, modules: results };
+  }
+
+  // ── Vault Watcher ──
+
+  private vaultDrainInterval: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * Wire vault file changes → RAG re-index queue.
+   * Starts the vault filesystem watcher and a periodic drain loop.
+   */
+  private startVaultWatcher(): void {
+    const vault = this.memory.vault;
+
+    // Register handler: enqueue changed files for RAG re-index
+    vault.onFileChanged((path: string, changeType: 'create' | 'update' | 'delete') => {
+      if (changeType === 'delete') {
+        this.rag.removeFile(path);
+        log.debug('Vault file removed from RAG index', { path });
+      } else {
+        this.rag.enqueueReindex(path);
+        log.debug('Vault file queued for RAG re-index', { path, changeType });
+      }
+    });
+
+    // Start filesystem watch
+    vault.startWatch();
+
+    // Drain re-index queue every 10 seconds
+    this.vaultDrainInterval = setInterval(async () => {
+      try {
+        const processed = await this.rag.drainQueue(async (p: string) => {
+          try {
+            return vault.readFile(p);
+          } catch {
+            return null;
+          }
+        });
+        if (processed > 0) {
+          log.info('RAG re-index drained', { processed });
+        }
+      } catch (err) {
+        log.warn('RAG drain failed', { error: err instanceof Error ? err.message : String(err) });
+      }
+    }, 10_000);
+
+    // Unref so timer doesn't prevent process exit
+    this.vaultDrainInterval.unref();
+
+    log.info('Vault watcher started — file changes will trigger RAG re-indexing');
+  }
+
+  /**
+   * Stop the vault watcher and drain timer.
+   */
+  private stopVaultWatcher(): void {
+    if (this.vaultDrainInterval) {
+      clearInterval(this.vaultDrainInterval);
+      this.vaultDrainInterval = null;
+    }
+
+    this.memory.vault.stopWatch();
+    log.info('Vault watcher stopped');
   }
 }
 
