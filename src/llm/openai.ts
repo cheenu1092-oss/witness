@@ -10,7 +10,7 @@
 
 import type {
   LLMProviderAdapter, LLMRequest, LLMResponse, ProviderConfig,
-  ConversationMessage, MCPToolDefinition, ToolResultInput,
+  MCPToolDefinition,
 } from './types.js';
 import type { LLMUsage, ToolCall } from '../types/index.js';
 import { VedError } from '../types/errors.js';

@@ -103,6 +103,15 @@ const PARAM_ESCALATORS: Record<string, ParamEscalator[]> = {
       }
       return undefined;
     },
+    // GAP-1 fix: executable scripts are high-risk writes
+    (p, reasons) => {
+      const path = String(p['file_path'] ?? p['path'] ?? '');
+      if (/\.(sh|bat|ps1|cmd|bash|zsh)$/i.test(path)) {
+        reasons.push('Writing executable script file');
+        return 'high';
+      }
+      return undefined;
+    },
   ],
   Edit: [
     (p, reasons) => {
@@ -110,6 +119,15 @@ const PARAM_ESCALATORS: Record<string, ParamEscalator[]> = {
       if (/\.(env|key|pem|crt|p12|pfx|jks)$/i.test(path) || /\.ssh\//i.test(path)) {
         reasons.push('Editing sensitive file');
         return 'critical';
+      }
+      return undefined;
+    },
+    // GAP-1 fix: executable scripts are high-risk edits
+    (p, reasons) => {
+      const path = String(p['file_path'] ?? p['path'] ?? '');
+      if (/\.(sh|bat|ps1|cmd|bash|zsh)$/i.test(path)) {
+        reasons.push('Editing executable script file');
+        return 'high';
       }
       return undefined;
     },
@@ -166,25 +184,29 @@ export class TrustEngine {
    * Resolve the trust tier for a user on a channel.
    *
    * Checks in order:
-   * 1. trust_ledger table (runtime grants/revocations)
-   * 2. config.ownerIds → tier 4
-   * 3. config.tribeIds → tier 3
-   * 4. config.knownIds → tier 2
-   * 5. config.defaultTier (fallback)
+   * 1. Config lists for floor: ownerIds (tier 4), tribeIds (tier 3), knownIds (tier 2)
+   * 2. Runtime trust_ledger table (can elevate above config, never below)
+   * 3. Config defaultTier (fallback if no config match and no ledger entry)
+   *
+   * SECURITY (VULN-10): Config ownerIds are an immutable floor — the ledger
+   * can only elevate above config tier, never downgrade below it.
    */
   resolveTier(channel: string, userId: string): TrustTier {
-    // Check runtime trust_ledger first
+    // Determine config-based floor first
+    let configTier: TrustTier = this.config.defaultTier;
+    if (this.config.ownerIds.includes(userId)) configTier = 4;
+    else if (this.config.tribeIds.includes(userId)) configTier = 3;
+    else if (this.config.knownIds.includes(userId)) configTier = 2;
+
+    // Check runtime trust_ledger
     const row = this.stmtGetTrust.get({ channel, userId }) as TrustLedgerRow | undefined;
     if (row) {
-      return row.trust_tier as TrustTier;
+      const ledgerTier = row.trust_tier as TrustTier;
+      // Ledger can only elevate above config, never below (VULN-10 fix)
+      return Math.max(ledgerTier, configTier) as TrustTier;
     }
 
-    // Check config lists
-    if (this.config.ownerIds.includes(userId)) return 4;
-    if (this.config.tribeIds.includes(userId)) return 3;
-    if (this.config.knownIds.includes(userId)) return 2;
-
-    return this.config.defaultTier;
+    return configTier;
   }
 
   /**
@@ -260,6 +282,11 @@ export class TrustEngine {
   /**
    * Grant a trust tier to a user on a channel.
    * Revokes any existing active trust entry first.
+   *
+   * SECURITY (VULN-9): Only owners (tier 4 via config) can grant trust.
+   * Prevents self-escalation via DB manipulation at the API level.
+   *
+   * @throws Error if grantedBy is not in config.ownerIds
    */
   grantTrust(
     channel: string,
@@ -268,6 +295,14 @@ export class TrustEngine {
     grantedBy: string,
     reason = '',
   ): void {
+    // VULN-9 fix: validate that grantedBy is a config-level owner
+    if (!this.config.ownerIds.includes(grantedBy)) {
+      throw new Error(
+        `Trust grant denied: '${grantedBy}' is not an authorized owner. ` +
+        `Only config ownerIds can grant trust.`
+      );
+    }
+
     const now = Date.now();
     // Revoke existing active entry
     this.stmtRevokeTrust.run({ channel, userId, revokedAt: now });

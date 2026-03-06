@@ -41,11 +41,11 @@
 | 39+ | CYCLE | BUILD(2)/TEST(2)/RED-TEAM(2) |
 
 ## Current State
-- **Session Number:** 28
-- **Current Phase:** PLAN COMPLETE ✅ — Ready for BUILD
-- **Last Run:** 2026-03-05
+- **Session Number:** 48
+- **Current Phase:** CYCLE (CI/CD setup + Docker parity — complete)
+- **Last Run:** 2026-03-06
 - **Cron ID:** cb0cd4f6-834e-42ea-a816-aecddc51ca2d
-- **Next Session:** 29 — BUILD: `ved-types` + `ved-audit` + `ved-trust` + database schema (foundation)
+- **Next Session:** 49 — Push to GitHub (rename witness→ved), v0.1.0 release, or feature work
 
 ## Session Log
 (Sessions 1-20: see individual session files in sessions/)
@@ -56,12 +56,87 @@
 - Sessions 15-16: RED-TEAM — 5 vulns found+fixed, external anchoring
 - Sessions 17-18: BUILD — CLI, migrations, validation, 300 tests
 - Sessions 19-20: TEST/RED-TEAM — 393 tests, 8 total vulns found+fixed
-- **Session 21:** THINK — Core event loop design. 7-step pipeline (receive→enrich→decide→act→record→respond→maintain). Trust matrix, agentic sub-loop, crash recovery. Produced `docs/event-loop.md` (14.7KB).
-- **Session 22:** THINK — Obsidian memory deep dive. 6-folder vault structure, YAML frontmatter schemas, wikilink conventions, VaultManager interface, graph walk algorithm, T1→T2 compression, batched git integration, template system. Produced `docs/obsidian-memory.md` (26KB).
-- **Session 23:** THINK — RAG pipeline design: heading-based chunking, sqlite-vec + FTS5 + graph walk, RRF fusion, async reindex queue. Ved manifesto README. Produced `docs/rag-pipeline.md` (27KB) + `README.md` (7KB). **THINK PHASE COMPLETE.**
-- **Session 24:** PLAN — Module interfaces + TypeScript type definitions. All 8 modules + shared types fully specified. 48KB `docs/module-interfaces.md`: ved-types (shared), ved-core (EventLoop, SessionManager, WorkingMemory, MessageQueue), ved-llm (LLMClient, provider adapters), ved-mcp (MCPClient, transports), ved-memory (MemoryManager, VaultManager, VaultGit, TemplateEngine), ved-rag (RagPipeline, Embedder, Chunker), ved-audit (AuditLog, anchoring), ved-trust (TrustEngine, work orders), ved-channel (ChannelManager, adapters). Complete SQLite DDL. File structure with ~7,700 LoC estimate. Only 6 external deps.
-- **Session 25:** PLAN — Complete database schema: 16 tables (8 expanded + 8 new), forward-only migration system with checksums, 29 indexes, data lifecycle rules, resolved all 5 open questions from S24. Produced `docs/database-schema.md` (37KB).
-- **Session 26:** PLAN — Config schema (5-layer loading, 16 validation rules, `ved init`), error codes (42 codes, 10 categories, `VedError` class), structured logging (JSON/pretty, module-scoped, 14 audit event types). Produced `docs/config-errors-logging.md` (30KB). Zero new deps.
-- **Session 27:** PLAN — MCP integration spec: server lifecycle (5-state FSM, lazy connect), stdio + HTTP/SSE transports (full implementation), tool discovery (namespacing, caching, dynamic changes), permission model (trust×risk matrix, server trust floors, tool filtering), execution flow (5-step sequential pipeline), retry/timeout (no tool retries, exponential backoff for servers), LLM formatting, built-in MCP servers (@ved/mcp-memory, @ved/mcp-vault-git). Resolved 6 open questions. Produced `docs/mcp-integration.md` (33KB).
-- **Session 28:** PLAN — End-to-end walkthrough: traced full user message through all 7 pipeline steps and 8 modules. Validated 21 interface boundaries. Found 6 gaps (1 medium, 4 low, 1 trivial) — all resolved. Build order defined: types+audit+trust → core → memory → RAG → LLM → MCP+channels. Produced `docs/end-to-end-walkthrough.md` (35KB). **PLAN PHASE COMPLETE.**
-- **Session 29 (next):** BUILD — `ved-types` + `ved-audit` + `ved-trust` + database schema (foundation, Docker)
+- **Session 21:** THINK — Core event loop design. 7-step pipeline. Produced `docs/event-loop.md` (14.7KB).
+- **Session 22:** THINK — Obsidian memory deep dive. Produced `docs/obsidian-memory.md` (26KB).
+- **Session 23:** THINK — RAG pipeline design + Ved manifesto. Produced `docs/rag-pipeline.md` (27KB) + `README.md` (7KB). **THINK PHASE COMPLETE.**
+- **Session 24:** PLAN — Module interfaces + TypeScript types. Produced `docs/module-interfaces.md` (48KB).
+- **Session 25:** PLAN — Database schema: 16 tables, 29 indexes. Produced `docs/database-schema.md` (37KB).
+- **Session 26:** PLAN — Config, errors, logging. Produced `docs/config-errors-logging.md` (30KB).
+- **Session 27:** PLAN — MCP integration spec. Produced `docs/mcp-integration.md` (33KB).
+- **Session 28:** PLAN — End-to-end walkthrough, 6 gaps resolved. Produced `docs/end-to-end-walkthrough.md` (35KB). **PLAN PHASE COMPLETE.**
+- **Session 29:** BUILD — ved-llm (multi-provider LLM client), fixed markdown parser. 319/319 tests pass.
+- **Session 30:** BUILD — **App wiring + CLI + full pipeline integration.** Discovered ved-mcp and ved-rag were already built (STATE.md was out of date). Built: `src/app.ts` (VedApp wiring), `src/cli.ts` (CLI entry), `src/index.ts` (root exports). Replaced stubbed EventLoop `processMessage` with full async 7-step pipeline: RAG enrichment → LLM call → trust-gated tool execution → agentic loop → channel response. Fixed 20+ pre-existing TS lint errors. Added vitest.config.ts. **0 type errors, 390/390 tests pass, 9,637 LoC.** **BUILD PHASE COMPLETE.**
+- **Session 31:** TEST — **20 integration tests covering full pipeline e2e.** Tests: 7-step flow, hash chain integrity, RAG enrichment + failure, agentic tool loop (single/multi/infinite/failure), trust×risk matrix (all 3 tiers), multi-message sessions, crash recovery, HMAC anchoring, no-LLM fallback, priority queue, channel failure resilience. Found: async tick race potential, trust matrix stricter than expected for tier 1. **410/410 tests pass.**
+- **Session 32:** TEST — **Docker build + TS compilation + 6 new integration tests.** TS compiles to 52 modules in dist/. Docker image builds clean (added git to apt-get). New tests: VedApp lifecycle smoke test, concurrent message race condition (5 rapid same-session messages), interleaved multi-user session isolation, audit chain integrity under load (10 rapid messages), build output verification. Concurrent processing safe due to SQLite WAL serialization. **416/416 tests pass (host + Docker parity). TEST PHASE COMPLETE.**
+- **Session 33:** RED-TEAM — **41 red-team tests across 7 attack categories.** Memory integrity (7 tests), trust escalation (9), session hijacking (5), RAG poisoning (4), hash chain attacks (6), input validation (6), pipeline attack scenarios (4). **4 vulnerabilities found:** trust ledger self-grant (MEDIUM), owner downgrade via ledger (MEDIUM), SessionManager.get() no ACL (LOW, by design), inbox double-processing (LOW). Hash chain, HMAC anchoring, SQL injection protection, trust matrix, agentic loop cap all held up. **457/457 tests pass.**
+- **Session 34:** RED-TEAM — **32 deeper red-team tests across 7 attack categories.** Prompt injection via RAG (3), tool chaining escalation (3), work order timing attacks (5), memory tier boundary attacks (5), vault path traversal (5), trust resolution edge cases (6), RAG fusion manipulation (5). **2 new vulnerabilities found:** expired work order re-openable via DB (MEDIUM), VaultManager no path containment (MEDIUM). **2 gaps documented.** Trust engine proved robust as defense-in-depth against prompt injection. **489/489 tests pass. RED-TEAM PHASE COMPLETE.**
+- **Session 35:** BUILD — **Fixed 5 vulnerabilities + 1 gap.** VULN-9: grantTrust() validates grantedBy is owner. VULN-10: config ownerIds immutable floor (ledger can only elevate). VULN-12: inbox double-processing prevention via recoveredIds Set. VULN-13: approve()/deny() check expires_at and resolved_at. VULN-14: VaultManager path containment on all I/O methods. GAP-1: .sh/.bat/.ps1 escalated to high risk. Updated 5 tests, added 1 new. **490/490 tests pass. All security vulnerabilities resolved.**
+- **Session 36:** TEST — **57 regression tests for all S35 fixes.** VULN-9 (9 tests): exhaustive grantTrust authorization. VULN-10 (9): immutable config floor across tiers/channels. VULN-12 (4): inbox double-processing prevention. VULN-13 (9): expired/resolved work order re-open blocked, including raw SQL bypass attempts. VULN-14 (14): path traversal on all 6 vault I/O methods. GAP-1 (12): all script extensions escalated. **547/547 tests pass. Zero regressions.**
+- **Session 37:** BUILD — **T1→T2 memory compression + Discord adapter enhancements.** Compressor (538 lines): LLM-based summarization, structured output parser (summary/facts/decisions/TODOs/entities), T2 daily note writes, T3 entity upserts, fallback on LLM failure, 4 compression triggers (threshold/idle/close/shutdown). EventLoop: wired compression into maintain() step, stale session cleanup, git auto-commit. Discord adapter (487 lines): reply support (bounded ID map), typing indicators (8s refresh), smart message splitting (2K limit), rich approval embeds (color-coded risk), cleanup on shutdown. **54 new tests (26 compressor + 28 discord), all pass host + Docker. 0 type errors.**
+- **Session 38:** BUILD — **Approval command parsing + session idle timer.** ApprovalParser (254 lines): parses `approve/deny/pending` commands from any channel, owner-only auth (tier 4), descriptive errors for expired/resolved/not-found, audits all resolutions. Wired into EventLoop before LLM pipeline (control plane bypass). SessionIdleTimer (209 lines): interval-based proactive idle detection independent of message flow, debounce guard, stats tracking, wired into EventLoop lifecycle. **44 new tests (26 approval + 18 idle timer), 640/645 pass (5 pre-existing). 0 type errors.**
+- **Session 39:** RED-TEAM — **40 red-team tests across 7 attack categories.** Approval command injection (9), authorization bypass (7), work order race conditions (6), idle timer manipulation (6), compressor prompt injection (4), Discord adapter abuse (2), pipeline interaction attacks (6). **2 vulnerabilities found:** VULN-15 deny reason captures trailing text (LOW, by design), VULN-16 null byte parsed as whitespace (LOW). **2 gaps documented:** GAP-2 compressor LLM can create entities with sensitive content, GAP-3 Discord message splitting breaks code blocks. Authorization, race conditions, SQL injection, debounce, control plane isolation all held. **685/685 tests (680 pass, 5 pre-existing). 0 type errors.**
+- **Session 40:** BUILD — **Fixed VULN-16 + GAP-3.** VULN-16: null byte stripping in ApprovalParser before regex parsing (defense-in-depth). GAP-3: rewrote Discord `splitMessage()` with code-block-aware splitting — tracks ``` fence state, closes open blocks at split boundaries, reopens with language tag in next chunk. **13 new tests (6 VULN-16 + 7 GAP-3). 698 total tests (693 pass, 5 pre-existing). 0 type errors.**
+- **Session 41:** BUILD — **Post-approval tool execution + GAP-2 content filtering.** Full HITL loop: approve→execute→result→channel→working memory. 11-pattern sensitive data filter (API keys, AWS, JWT, PEM, passwords, connection strings, bearer tokens, wallet keys, GitHub/Slack/Discord tokens) applied to all entity upserts. All known vulns + gaps resolved. **31 new tests (8 post-approval + 23 content filter). 729/729 pass (0 failures). 0 type errors.**
+- **Session 42:** TEST — **Docker parity + test infrastructure fixes.** Found/fixed Docker-only timing failure in `sweepExpired` test (1ms timeout race with VULN-13 expiry check → changed to 5000ms). Created `createMockMemory()` factory, replaced 21 inline memory mocks to eliminate `writeCompression is not a function` warnings during shutdown compression. **729/729 pass host + Docker. 0 type errors. 0 warnings.**
+- **Session 43:** RED-TEAM — **43 red-team tests across 7 attack categories.** Content filter bypass (Unicode confusables, base64/hex encoding, split-across-fields), content filter boundary (AWS/JWT/GitHub/Slack/PEM/connstr edge cases), post-approval race conditions (double-approve, concurrent owners, expiry boundary), session integrity (cross-session isolation, audit durability), work order timing (rapid create/approve, sweep safety), compressor→filter interaction (entity name encoding, secrets in LLM output), approval+filter combined (T1 raw storage, SQL injection, large params). **1 vulnerability found:** VULN-17 `ghr_` GitHub fine-grained PAT bypasses `gh[posh]_` regex (LOW). **4 findings documented** (Unicode confusable bypass, encoding bypass, entity name obfuscation, T1 raw secrets — all accepted risk). All existing defenses held: VULN-13 expiry checks, SQLite serialization, parameterized queries, T2/T3 content filter. **772/772 tests pass (host + Docker parity). 0 type errors.**
+- **Session 44:** BUILD — **Fixed VULN-17 + NFKC normalization + CLI UX + ved init.** VULN-17: regex changed from `gh[posh]_` to `gh[poshr]_` — ghr_ fine-grained PATs now caught. NFKC: `filterSensitiveContent()` now normalizes Unicode (NFKC + ZW char stripping) before regex matching — fullwidth Latin and zero-width injection bypasses eliminated. CLI: added banner, /help, /status (uptime + message count), /clear. ved init: creates vault directory structure (daily/entities/concepts/decisions), config.local.yaml template, vault README. **35 new tests. 807/807 pass (host + Docker). 0 type errors. All 17 vulnerabilities resolved.**
+- **Session 45:** TEST — **56 regression tests across 6 categories.** VULN-17 boundaries (10): length thresholds, case sensitivity, positional, mixed types. NFKC edge cases (13): ligatures, superscripts, halfwidth katakana, 5 ZW char classes, fullwidth keywords, 10K string perf. CLI lifecycle (8): double shutdown, pre-start send, special chars, 100K content. ved init idempotency (6): double-init safety, YAML validity, path edge cases. Discord splitMessage GAP-3 (9): code-block closure/reopening, language tags, hard splits. Content filter interaction (10): fullwidth prefixes, redaction counting, ZW in JWT/AWS, idempotent filtering. **No regressions found. 863/863 pass (host + Docker parity). 0 type errors.**
+- **Session 46:** RED-TEAM — **64 red-team tests across 7 attack categories.** CLI command injection (7): ANSI escapes, OSC, CR/LF/backspace injection. Approval parser edge cases (10): ReDoS (100K input <100ms), SQL injection, format strings, unicode IDs. splitMessage adversarial (9): nested code blocks, backtick bomb (500 fences), boundary cases. Content filter deep evasion (12): Cyrillic homoglyphs (accepted risk confirmed), RTL override, combining diacriticals, fullwidth symbols, BOM. Path traversal advanced (11): null bytes, URL encoding, symlinks, all 6 vault I/O methods. Event loop message shape (8): 10MB input, binary data, prototype pollution IDs. Work order ID injection (6): markdown/HTML in IDs, audit correctness. **1 gap found:** GAP-4 U+2061-U+2064 invisible math chars not in ZW strip regex (LOW). **927/927 pass (host + Docker parity). 0 type errors.**
+- **Session 47:** BUILD — **Fixed GAP-4 + open-source readiness.** Extended ZW strip regex from `\u2060` to `\u2060-\u2064` — all invisible math operators now caught. Created LICENSE (MIT), CONTRIBUTING.md (dev guide, PR process, security disclosure), CHANGELOG.md (full v0.1.0 notes). **24 new tests (19 GAP-4 verification + 5 open-source checks). 951/951 pass. 0 type errors. Zero open security issues.**
+- **Session 48:** CYCLE — **CI/CD setup + Docker parity.** Fixed Dockerfile to COPY open-source files (LICENSE, CONTRIBUTING.md, CHANGELOG.md, README.md) — resolved 4 Docker-only test failures. Created GitHub Actions CI/CD (`.github/workflows/ci.yml`): 3 jobs (test matrix Node 20+22, Docker build+test, lint+typecheck). Added `.dockerignore` for lean builds. **951/951 pass (host + Docker parity). 0 type errors.**
+
+## Phase Schedule (Updated)
+| Sessions | Phase | Description |
+|----------|-------|-------------|
+| 21-23 | ✅ THINK | Design runtime + memory architecture |
+| 24-28 | ✅ PLAN | Architecture docs, memory schema, API specs |
+| 29-30 | ✅ BUILD | All modules + app wiring + CLI |
+| 31-32 | TEST | Integration testing (full pipeline e2e, Docker) |
+| 33-34 | ✅ RED-TEAM | Security + memory integrity attacks |
+| 35 | ✅ BUILD | Fix vulns (9,10,12,13,14) + gap-1 |
+| 36 | ✅ TEST | Regression tests for S35 fixes (57 tests) |
+| 37 | ✅ BUILD | Discord adapter + T1→T2 compression |
+| 38 | ✅ BUILD | Approval command parsing + session idle timer |
+| 39 | ✅ RED-TEAM | Approval commands, idle timer, new surfaces (40 tests) |
+| 40 | ✅ BUILD | Fixed VULN-16 + GAP-3 (13 new tests) |
+| 41 | ✅ BUILD | Post-approval execution + GAP-2 content filter (31 new tests) |
+| 42 | ✅ TEST | Docker parity + test infrastructure fixes |
+| 43 | ✅ RED-TEAM | Content filter bypass + post-approval races (43 tests) |
+| 44 | ✅ BUILD | VULN-17 fix + NFKC normalization + CLI UX + ved init (35 tests) |
+| 45 | ✅ TEST | S44 regression: VULN-17, NFKC, CLI, init, splitMessage (56 tests) |
+| 46 | ✅ RED-TEAM | CLI injection, parser edge cases, deep evasion (64 tests) |
+| 47 | ✅ BUILD | GAP-4 fix + open-source readiness (24 tests) |
+| 48 | ✅ CYCLE | CI/CD setup + Docker parity fix |
+| 49+ | CYCLE | GitHub push (witness→ved), v0.1.0 release, features |
+
+## Built Modules (Status)
+| Module | Status | LoC | Tests |
+|--------|--------|-----|-------|
+| ved-types | ✅ Complete | 538 | (type-only) |
+| ved-db | ✅ Complete | 245 | 9 |
+| ved-audit | ✅ Complete | 474 | 38 |
+| ved-trust | ✅ Complete | 558 | 55 |
+| ved-core | ✅ Complete | 1,542 | 118 |
+| ved-memory | ✅ Complete | 1,668 | 63 |
+| ved-llm | ✅ Complete | 1,028 | 37 |
+| ved-mcp | ✅ Complete | 837 | 22 |
+| ved-rag | ✅ Complete | 1,211 | 49 |
+| ved-channel | ✅ Complete | 921 | 28 |
+| ved-compressor | ✅ Complete | 538 | 26 |
+| approval-parser | ✅ Complete | 254 | 26 |
+| idle-timer | ✅ Complete | 209 | 18 |
+| app + cli + index | ✅ Complete | 360 | 0 |
+| integration tests | ✅ Complete | ~600 | 20 |
+| red-team S33 | ✅ Complete | ~600 | 41 |
+| red-team S34 | ✅ Complete | ~750 | 32 |
+| regression S35 | ✅ Complete | ~500 | 57 |
+| red-team S39 | ✅ Complete | ~630 | 40 |
+| vuln16+gap3 S40 | ✅ Complete | ~50 | 13 |
+| post-approval S41 | ✅ Complete | ~180 | 8 |
+| content-filter S41 | ✅ Complete | ~120 | 23 |
+| red-team S43 | ✅ Complete | ~802 | 43 |
+| build S44 | ✅ Complete | ~317 | 35 |
+| regression S45 | ✅ Complete | ~650 | 56 |
+| red-team S46 | ✅ Complete | ~850 | 64 |
+| build S47 | ✅ Complete | ~150 | 24 |
+| **Total** | **ALL COMPLETE** | **~18,192** | **951** |

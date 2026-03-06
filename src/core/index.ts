@@ -27,3 +27,15 @@ export type { MessagePriority } from './queue.js';
 // Event Loop
 export { EventLoop } from './event-loop.js';
 export type { EventLoopOptions } from './event-loop.js';
+
+// Compressor (T1→T2)
+export { Compressor } from './compressor.js';
+export type { CompressionResult, CompressorOptions } from './compressor.js';
+
+// Approval Command Parser
+export { parseApprovalCommand, executeApprovalCommand, formatPendingWorkOrder } from './approval-parser.js';
+export type { ParsedCommand, CommandResult, ApprovalAction, ApprovalParserDeps } from './approval-parser.js';
+
+// Session Idle Timer
+export { SessionIdleTimer } from './idle-timer.js';
+export type { IdleTimerConfig, IdleTimerDeps, IdleCheckResult, IdleTimerStats } from './idle-timer.js';

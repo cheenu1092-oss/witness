@@ -14,7 +14,7 @@ import {
   readFileSync, writeFileSync, readdirSync, existsSync,
   mkdirSync, unlinkSync, renameSync, statSync, watch,
 } from 'node:fs';
-import { join, relative, dirname, basename } from 'node:path';
+import { join, relative, dirname, basename, resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
 
 import type { VaultFile, VaultFileStats, VaultIndex, VaultEntityType, GraphNode, GraphWalkOptions } from '../types/index.js';
@@ -121,6 +121,22 @@ export class VaultManager extends EventEmitter {
     this.watchDebounce.clear();
   }
 
+  /**
+   * Validate that a relative path resolves within the vault directory.
+   * SECURITY (VULN-14): Prevents path traversal attacks (e.g. '../escaped.md').
+   *
+   * @throws Error if the resolved path escapes the vault boundary.
+   */
+  private assertPathContained(relPath: string): void {
+    const absPath = resolve(join(this.vaultPath, relPath));
+    const vaultRoot = resolve(this.vaultPath);
+    if (!absPath.startsWith(vaultRoot + '/') && absPath !== vaultRoot) {
+      throw new Error(
+        `Path traversal blocked: '${relPath}' resolves outside vault boundary`
+      );
+    }
+  }
+
   /** Close the vault manager. */
   close(): void {
     this.stopWatch();
@@ -131,6 +147,7 @@ export class VaultManager extends EventEmitter {
 
   /** Read and parse a vault file. Path is relative to vault root. */
   readFile(relPath: string): VaultFile {
+    this.assertPathContained(relPath);
     const absPath = join(this.vaultPath, relPath);
     if (!existsSync(absPath)) {
       throw new Error(`Vault file not found: ${relPath}`);
@@ -173,6 +190,7 @@ export class VaultManager extends EventEmitter {
 
   /** Create a new file with frontmatter and body. */
   createFile(relPath: string, frontmatter: Record<string, unknown>, body: string): void {
+    this.assertPathContained(relPath);
     const absPath = join(this.vaultPath, relPath);
     mkdirSync(dirname(absPath), { recursive: true });
 
@@ -187,6 +205,7 @@ export class VaultManager extends EventEmitter {
 
   /** Update an existing file. */
   updateFile(relPath: string, updates: VaultFileUpdate): void {
+    this.assertPathContained(relPath);
     const file = this.readFile(relPath);
     const absPath = join(this.vaultPath, relPath);
 
@@ -219,6 +238,7 @@ export class VaultManager extends EventEmitter {
 
   /** Append content to a file (used for daily notes). */
   appendToFile(relPath: string, content: string): void {
+    this.assertPathContained(relPath);
     const absPath = join(this.vaultPath, relPath);
     if (!existsSync(absPath)) {
       // Create with minimal frontmatter
@@ -238,6 +258,7 @@ export class VaultManager extends EventEmitter {
 
   /** Delete a vault file. */
   deleteFile(relPath: string): void {
+    this.assertPathContained(relPath);
     const absPath = join(this.vaultPath, relPath);
     if (!existsSync(absPath)) return;
 
@@ -250,6 +271,8 @@ export class VaultManager extends EventEmitter {
 
   /** Rename/move a vault file. Updates all wikilinks referencing it. */
   renameFile(oldPath: string, newPath: string): void {
+    this.assertPathContained(oldPath);
+    this.assertPathContained(newPath);
     const absOld = join(this.vaultPath, oldPath);
     const absNew = join(this.vaultPath, newPath);
     mkdirSync(dirname(absNew), { recursive: true });

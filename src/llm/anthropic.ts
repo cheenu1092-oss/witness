@@ -85,7 +85,7 @@ export class AnthropicAdapter implements LLMProviderAdapter {
 
   parseResponse(raw: unknown): LLMResponse {
     const resp = raw as AnthropicResponse;
-    const startTime = Date.now(); // approximate — actual timing done by caller
+    // Timing is done by the caller (LLMClient.chat)
 
     const toolCalls: ToolCall[] = [];
     let responseText = '';

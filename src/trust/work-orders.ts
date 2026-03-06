@@ -100,16 +100,20 @@ export class WorkOrderManager {
       ORDER BY created_at ASC
     `);
 
+    // VULN-13 fix: also check resolved_at IS NULL and expires_at > now
     this.stmtApprove = db.prepare(`
       UPDATE work_orders
       SET status = 'approved', resolved_at = @resolvedAt, resolved_by = @resolvedBy
       WHERE id = @id AND status = 'pending'
+        AND resolved_at IS NULL AND expires_at > @resolvedAt
     `);
 
+    // VULN-13 fix: also check resolved_at IS NULL and expires_at > now
     this.stmtDeny = db.prepare(`
       UPDATE work_orders
       SET status = 'denied', resolved_at = @resolvedAt, resolved_by = @resolvedBy
       WHERE id = @id AND status = 'pending'
+        AND resolved_at IS NULL AND expires_at > @resolvedAt
     `);
 
     this.stmtExpire = db.prepare(`

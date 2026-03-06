@@ -117,40 +117,47 @@ describe('TrustEngine.resolveTier', () => {
     expect(engine.resolveTier('cli', 'owner1')).toBe(4); // not 2
   });
 
-  it('runtime grant overrides config lists', () => {
+  it('runtime grant cannot downgrade below config floor (VULN-10)', () => {
     const { engine } = makeEngine();
-    // owner1 would be tier 4 from config
-    engine.grantTrust('cli', 'owner1', 2, 'user:admin', 'demoted');
-    expect(engine.resolveTier('cli', 'owner1')).toBe(2);
+    // owner1 is tier 4 from config — ledger can't downgrade
+    engine.grantTrust('cli', 'owner1', 2, 'owner1', 'attempted demotion');
+    expect(engine.resolveTier('cli', 'owner1')).toBe(4); // config floor wins
   });
 
   it('runtime grant for unknown user upgrades tier', () => {
     const { engine } = makeEngine();
-    engine.grantTrust('cli', 'newuser', 3, 'user:admin', 'trusted');
+    engine.grantTrust('cli', 'newuser', 3, 'owner1', 'trusted');
     expect(engine.resolveTier('cli', 'newuser')).toBe(3);
   });
 
   it('revoke removes runtime grant, falls back to config', () => {
     const { engine } = makeEngine();
-    engine.grantTrust('cli', 'known1', 4, 'user:admin', 'promoted');
+    engine.grantTrust('cli', 'known1', 4, 'owner1', 'promoted');
     expect(engine.resolveTier('cli', 'known1')).toBe(4);
-    engine.revokeTrust('cli', 'known1', 'user:admin');
+    engine.revokeTrust('cli', 'known1', 'owner1');
     // After revoke, falls back to config (known1 is in knownIds → tier 2)
     expect(engine.resolveTier('cli', 'known1')).toBe(2);
   });
 
   it('grants are channel-scoped', () => {
     const { engine } = makeEngine();
-    engine.grantTrust('discord', 'newuser', 3, 'user:admin');
+    engine.grantTrust('discord', 'newuser', 3, 'owner1');
     expect(engine.resolveTier('discord', 'newuser')).toBe(3);
     expect(engine.resolveTier('cli', 'newuser')).toBe(1); // still stranger on cli
   });
 
   it('multiple grants: latest wins', () => {
     const { engine } = makeEngine();
-    engine.grantTrust('cli', 'user1', 2, 'admin');
-    engine.grantTrust('cli', 'user1', 3, 'admin', 'promoted');
+    engine.grantTrust('cli', 'user1', 2, 'owner1');
+    engine.grantTrust('cli', 'user1', 3, 'owner1', 'promoted');
     expect(engine.resolveTier('cli', 'user1')).toBe(3);
+  });
+
+  it('grantTrust rejects non-owner grantedBy (VULN-9)', () => {
+    const { engine } = makeEngine();
+    expect(() => {
+      engine.grantTrust('cli', 'newuser', 3, 'attacker', 'self-grant');
+    }).toThrow('not an authorized owner');
   });
 });
 
@@ -390,7 +397,8 @@ describe('WorkOrderManager', () => {
   });
 
   it('sweepExpired does not affect approved/denied orders', () => {
-    const fastWom = new WorkOrderManager(db, 1);
+    // Use 5000ms timeout (not 1ms) to ensure approve() succeeds before expiry
+    const fastWom = new WorkOrderManager(db, 5000);
     const wo = fastWom.create('sess-1', 'msg-1', 'exec', {}, baseRisk, 2);
     fastWom.approve(wo.id, 'user:admin');
     const swept = fastWom.sweepExpired();
