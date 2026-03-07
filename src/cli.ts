@@ -17,6 +17,7 @@ import { getConfigDir, loadConfig, validateConfig } from './core/config.js';
 import { createLogger } from './core/log.js';
 import type { MergedResult } from './rag/types.js';
 import type { VaultExport } from './export-types.js';
+import { memoryCommand } from './cli-memory.js';
 import { VedHttpServer } from './http.js';
 
 const log = createLogger('cli');
@@ -66,6 +67,17 @@ async function main(): Promise<void> {
       return gc(args.slice(1));
     case 'webhook':
       return webhook(args.slice(1));
+    case 'memory':
+    case 'mem': {
+      const app = createApp();
+      await app.init();
+      try {
+        await memoryCommand(app, args.slice(1));
+      } finally {
+        await app.stop();
+      }
+      return;
+    }
     case 'serve':
     case 'api':
       return serve(args.slice(1));
@@ -76,7 +88,7 @@ async function main(): Promise<void> {
       return start();
     default:
       console.error(`Unknown command: ${command}`);
-      console.log('Usage: ved [init|start|serve|status|stats|search|reindex|config|export|import|history|doctor|backup|cron|upgrade|watch|webhook|plugin|gc|completions|version]');
+      console.log('Usage: ved [init|start|serve|status|stats|search|memory|reindex|config|export|import|history|doctor|backup|cron|upgrade|watch|webhook|plugin|gc|completions|version]');
       process.exit(1);
   }
 }

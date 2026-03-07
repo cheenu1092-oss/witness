@@ -1407,7 +1407,7 @@ export class VedApp {
    */
   static generateCompletions(shell: 'bash' | 'zsh' | 'fish'): string {
     const commands = [
-      'init', 'start', 'run', 'serve', 'status', 'stats', 'search', 'reindex',
+      'init', 'start', 'run', 'serve', 'status', 'stats', 'search', 'memory', 'reindex',
       'config', 'export', 'import', 'history', 'doctor', 'backup', 'cron',
       'completions', 'upgrade', 'watch', 'webhook', 'plugin', 'gc', 'version',
     ];
@@ -1418,6 +1418,7 @@ export class VedApp {
     const pluginSubs = ['list', 'tools', 'test', 'add', 'remove'];
     const webhookSubs = ['list', 'add', 'remove', 'enable', 'disable', 'deliveries', 'stats', 'test'];
     const gcSubs = ['run', 'status'];
+    const memorySubs = ['list', 'show', 'graph', 'timeline', 'daily', 'forget', 'tags', 'types'];
 
     switch (shell) {
       case 'bash':
@@ -1456,6 +1457,10 @@ _ved_completions() {
       ;;
     webhook)
       COMPREPLY=( $(compgen -W "${webhookSubs.join(' ')}" -- "\${cur}") )
+      return 0
+      ;;
+    memory|mem)
+      COMPREPLY=( $(compgen -W "${memorySubs.join(' ')}" -- "\${cur}") )
       return 0
       ;;
     restore)
@@ -1514,6 +1519,7 @@ _ved() {
     'upgrade:Manage database migrations'
     'watch:Watch vault for changes (standalone)'
     'webhook:Manage webhook event delivery'
+    'memory:Browse and manage Obsidian knowledge graph'
     'completions:Generate shell completions'
     'version:Show version'
   )
@@ -1542,6 +1548,9 @@ _ved() {
           ;;
         webhook)
           _values 'subcommand' 'list[List webhooks]' 'add[Register a webhook]' 'remove[Remove a webhook]' 'enable[Enable a webhook]' 'disable[Disable a webhook]' 'deliveries[View delivery history]' 'stats[Delivery statistics]' 'test[Send a test event]'
+          ;;
+        memory|mem)
+          _values 'subcommand' 'list[List entities]' 'show[Display entity details]' 'graph[Show wikilink connections]' 'timeline[Recent memory activity]' 'daily[Show/create daily note]' 'forget[Soft-delete to archive]' 'tags[List all tags]' 'types[List entity types]'
           ;;
         serve)
           _arguments \\
@@ -1620,6 +1629,9 @@ ${upgradeSubs.map(s => `complete -c ved -n '__fish_seen_subcommand_from upgrade'
 
 # webhook subcommands
 ${webhookSubs.map(s => `complete -c ved -n '__fish_seen_subcommand_from webhook' -a '${s}'`).join('\n')}
+
+# memory subcommands
+${memorySubs.map(s => `complete -c ved -n '__fish_seen_subcommand_from memory' -a '${s}'`).join('\n')}
 
 # serve flags
 complete -c ved -n '__fish_seen_subcommand_from serve' -s p -l port -d 'Port'
