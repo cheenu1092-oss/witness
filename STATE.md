@@ -41,11 +41,11 @@
 | 39+ | CYCLE | BUILD(2)/TEST(2)/RED-TEAM(2) |
 
 ## Current State
-- **Session Number:** 59
-- **Current Phase:** CYCLE (dedup + test coverage)
+- **Session Number:** 60
+- **Current Phase:** CYCLE (GitHub push + maintenance)
 - **Last Run:** 2026-03-06
 - **Cron ID:** cb0cd4f6-834e-42ea-a816-aecddc51ca2d
-- **Next Session:** 60 — Push to GitHub, Discord channel polish, or new feature cycle
+- **Next Session:** 61 — New feature cycle (plugin marketplace? webhooks? HTTP API?)
 
 ## Session Log
 (Sessions 1-20: see individual session files in sessions/)
@@ -95,6 +95,7 @@
 - **Session 57:** CYCLE — **`ved cron` — scheduled job engine.** CronScheduler (420 lines): 5-field cron expression parser (wildcards, ranges, steps, lists, aliases), next-run calculator, SQLite-backed persistence (cron_jobs + cron_history tables), built-in job types (backup/reindex/doctor), tick-based execution (30s interval), manual trigger, enable/disable, execution history with timing, audit-logged (5 new event types). v002 migration adds last_result/last_error columns + cron_history table. CLI: 7 subcommands (list/add/remove/enable/disable/run/history). Shell completions updated. CLI now has 15 commands. **51 new tests. 1127/1127 pass (host + Docker parity). 0 type errors.**
 - **Session 58:** CYCLE — **`ved upgrade` + `ved watch` CLI.** Upgrade: 4 subcommands (status/run/verify/history) for database migration lifecycle — shows schema version, auto-backup before applying pending migrations, checksum integrity verification, migration history with applied dates. Watch: standalone vault file watcher — initializes + indexes vault, watches for changes, triggers RAG re-indexing, blocks until signal — no event loop or channels started. Shell completions updated for all 3 shells. CLI now has 17 commands. **22 new tests. 1149/1149 pass (Docker parity). 0 type errors.**
 - **Session 59:** CYCLE — **Dedup fix + GC/Plugin test coverage.** Fixed critical code duplication from S58: duplicate method definitions in app.ts (14 methods), cli.ts (4 functions), mcp/client.ts (4 methods). Removed ~646 lines of dead code. Eliminated 28 TypeScript errors (14 TS2393 duplicate + 4 property mismatch + 10 cascading). Kept properly-typed first set in app.ts, correctly-wired second set in cli.ts. Wrote 24 tests covering gcStatus (5), gcRun (6), pluginList (2), pluginTools (2), pluginAdd+Remove (3), pluginTest (1), dedup verification (5). **24 new tests. 1173/1173 pass (Docker parity). 0 type errors.**
+- **Session 60:** CYCLE — **GitHub push (S56-59) + cron test fix.** Fixed 2 timezone-sensitive cron tests (UTC→local Date constructors). Pushed 4 sessions to GitHub (fa3308b, 17 files, +4888 lines). Docker parity verified. **1173/1173 pass. 0 type errors.**
 
 ## Phase Schedule (Updated)
 | Sessions | Phase | Description |
@@ -129,7 +130,8 @@
 | 57 | ✅ CYCLE | `ved cron` — scheduled job engine (51 tests) |
 | 58 | ✅ CYCLE | `ved upgrade` + `ved watch` CLI (22 tests) |
 | 59 | ✅ CYCLE | Dedup fix + GC/Plugin test coverage (24 tests) |
-| 60+ | CYCLE | GitHub push, Discord polish, new features |
+| 60 | ✅ CYCLE | GitHub push (S56-59), cron test fix |
+| 61+ | CYCLE | New features, polish, releases |
 
 ## Built Modules (Status)
 | Module | Status | LoC | Tests |
