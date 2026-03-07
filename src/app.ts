@@ -6,21 +6,26 @@
  */
 
 import Database from 'better-sqlite3';
-import { mkdirSync, existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { mkdirSync, existsSync, readdirSync, statSync, copyFileSync, rmSync } from 'node:fs';
+import { dirname, join, basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { execSync } from 'node:child_process';
 import { createLogger } from './core/log.js';
 import { loadConfig, validateConfig } from './core/config.js';
-import { migrate } from './db/migrate.js';
+import { migrate, currentVersion, verifyMigrations } from './db/migrate.js';
 import { EventLoop } from './core/event-loop.js';
+import { CronScheduler, type CronJob, type CronJobInput, type CronRunResult, type CronHistoryEntry } from './core/cron.js';
 import { LLMClient } from './llm/client.js';
 import { MCPClient } from './mcp/client.js';
 import { MemoryManager } from './memory/manager.js';
 import { VaultManager } from './memory/vault.js';
 import { RagPipeline } from './rag/pipeline.js';
 import { ChannelManager } from './channel/manager.js';
+import { VedError } from './types/errors.js';
 import type { VedConfig, ModuleHealth, VaultFile, AuditEntry } from './types/index.js';
 import type { IndexStats, RetrieveOptions, RetrievalContext } from './rag/types.js';
 import type { VaultExport, VaultExportFile, ExportOptions, ImportResult } from './export-types.js';
+import type { MCPServerConfig, MCPToolDefinition, ServerInfo } from './mcp/types.js';
 
 const log = createLogger('app');
 
@@ -46,6 +51,30 @@ export interface DoctorResult {
   infos: number;
 }
 
+export interface PluginTestResult {
+  serverName: string;
+  success: boolean;
+  toolCount: number;
+  tools: string[];
+  durationMs: number;
+  error?: string;
+}
+
+export interface GcStatus {
+  staleSessions: number;
+  staleSessionIds: string[];
+  oldAuditEntries: number;
+  oldAuditCutoff: number;
+  auditWarning?: string;
+}
+
+export interface GcResult {
+  sessionsClosed: number;
+  auditEntriesDeleted: number;
+  vacuumed: boolean;
+  durationMs: number;
+}
+
 export class VedApp {
   readonly config: VedConfig;
 
@@ -54,6 +83,7 @@ export class VedApp {
 
   // Modules
   readonly eventLoop: EventLoop;
+  readonly cron: CronScheduler;
   readonly llm: LLMClient;
   readonly mcp: MCPClient;
   readonly memory: MemoryManager;
@@ -61,6 +91,7 @@ export class VedApp {
   readonly channels: ChannelManager;
 
   private initialized = false;
+  private cronTickInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: VedConfig) {
     this.config = config;
@@ -93,6 +124,11 @@ export class VedApp {
       config,
       db: this.db,
     });
+
+    // Create cron scheduler
+    this.cron = new CronScheduler(this.db);
+    this.cron.setAudit((input) => this.eventLoop.audit.append(input));
+    this.cron.setExecutor((job) => this.executeCronJob(job));
   }
 
   /**
@@ -156,6 +192,12 @@ export class VedApp {
     // Start vault filesystem watcher → RAG re-index on changes
     this.startVaultWatcher();
 
+    // Start cron tick (check for due jobs every 30s)
+    this.startCronTick();
+
+    // Recalculate next_run for all jobs on startup (handles clock drift)
+    this.cron.recalculateAll();
+
     log.info('Ved is running');
 
     // Enter the main event loop (blocks)
@@ -167,6 +209,9 @@ export class VedApp {
    */
   async stop(): Promise<void> {
     log.info('Stopping Ved...');
+
+    // Stop cron tick
+    this.stopCronTick();
 
     // Stop vault watcher
     this.stopVaultWatcher();
@@ -658,6 +703,886 @@ export class VedApp {
     const infos = checks.filter(c => c.status === 'info').length;
 
     return { checks, passed, warned, failed, infos };
+  }
+
+  // ── Plugin (MCP Server Manager) ──
+
+  /**
+   * List all configured MCP servers with state/tool count.
+   */
+  pluginList(): ServerInfo[] {
+    return this.mcp.getServers();
+  }
+
+  /**
+   * List all discovered MCP tools. If serverName given, filter to that server.
+   */
+  pluginTools(serverName?: string): MCPToolDefinition[] {
+    const tools = this.mcp.tools;
+    if (!serverName) return tools;
+    return tools.filter(t => t.serverName === serverName);
+  }
+
+  /**
+   * Test a server: connect, list tools, return results.
+   */
+  async pluginTest(serverName: string): Promise<PluginTestResult> {
+    const startMs = Date.now();
+    const servers = this.mcp.getServers();
+    const info = servers.find(s => s.name === serverName);
+    if (!info) {
+      return {
+        serverName,
+        success: false,
+        toolCount: 0,
+        tools: [],
+        durationMs: 0,
+        error: `Server "${serverName}" not registered`,
+      };
+    }
+
+    try {
+      const result = await this.mcp.testServer(serverName);
+      return {
+        serverName,
+        success: true,
+        toolCount: result.tools.length,
+        tools: result.tools.map(t => t.originalName),
+        durationMs: Date.now() - startMs,
+      };
+    } catch (err) {
+      return {
+        serverName,
+        success: false,
+        toolCount: 0,
+        tools: [],
+        durationMs: Date.now() - startMs,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
+   * Add a server to the MCP client at runtime.
+   * Note: not persisted to config.yaml — session only.
+   */
+  async pluginAdd(config: MCPServerConfig): Promise<void> {
+    await this.mcp.addServer(config);
+  }
+
+  /**
+   * Remove a server from the MCP client at runtime.
+   * Returns true if removed, false if not found.
+   */
+  async pluginRemove(name: string): Promise<boolean> {
+    return this.mcp.removeServer(name);
+  }
+
+  // ── GC (Garbage Collection) ──
+
+  /**
+   * Report what GC would clean without acting.
+   */
+  gcStatus(options?: { sessionsDays?: number; auditDays?: number }): GcStatus {
+    if (!this.db) throw new VedError('DB_OPEN_FAILED', 'Database not initialized');
+
+    const sessionsDays = options?.sessionsDays ?? 30;
+    const auditDays = options?.auditDays ?? 90;
+    const sessionsCutoff = Date.now() - sessionsDays * 24 * 60 * 60 * 1000;
+    const auditCutoff = Date.now() - auditDays * 24 * 60 * 60 * 1000;
+
+    const staleSessions = this.db.prepare(
+      `SELECT id FROM sessions WHERE status IN ('active', 'idle') AND last_active < ?`
+    ).all(sessionsCutoff) as { id: string }[];
+
+    const oldAuditCount = (this.db.prepare(
+      `SELECT COUNT(*) as cnt FROM audit_log WHERE timestamp < ?`
+    ).get(auditCutoff) as { cnt: number }).cnt;
+
+    return {
+      staleSessions: staleSessions.length,
+      staleSessionIds: staleSessions.map(s => s.id),
+      oldAuditEntries: oldAuditCount,
+      oldAuditCutoff: auditCutoff,
+      auditWarning: oldAuditCount > 0
+        ? 'Deleting audit entries breaks the hash chain. Use --force to proceed.'
+        : undefined,
+    };
+  }
+
+  /**
+   * Run garbage collection: close stale sessions, optionally purge old audit entries, VACUUM.
+   */
+  gcRun(options?: { sessionsDays?: number; auditDays?: number; auditForce?: boolean }): GcResult {
+    if (!this.db) throw new VedError('DB_OPEN_FAILED', 'Database not initialized');
+
+    const startMs = Date.now();
+    const sessionsDays = options?.sessionsDays ?? 30;
+    const auditDays = options?.auditDays ?? 90;
+    const sessionsCutoff = Date.now() - sessionsDays * 24 * 60 * 60 * 1000;
+    const auditCutoff = Date.now() - auditDays * 24 * 60 * 60 * 1000;
+
+    // Close stale sessions
+    const sessionResult = this.db.prepare(
+      `UPDATE sessions SET status = 'closed', closed_at = ? WHERE status IN ('active', 'idle') AND last_active < ?`
+    ).run(Date.now(), sessionsCutoff);
+    const sessionsClosed = sessionResult.changes;
+
+    if (sessionsClosed > 0 && this.initialized) {
+      this.eventLoop.audit.append({
+        eventType: 'gc_sessions_cleaned',
+        actor: 'ved',
+        detail: { count: sessionsClosed, cutoffDays: sessionsDays },
+      });
+    }
+
+    // Delete old audit entries only with explicit --force
+    let auditEntriesDeleted = 0;
+    if (options?.auditForce) {
+      const auditResult = this.db.prepare(
+        `DELETE FROM audit_log WHERE timestamp < ?`
+      ).run(auditCutoff);
+      auditEntriesDeleted = auditResult.changes;
+    }
+
+    // VACUUM SQLite to reclaim space
+    this.db.exec('VACUUM');
+
+    if (this.initialized) {
+      this.eventLoop.audit.append({
+        eventType: 'gc_vacuum',
+        actor: 'ved',
+        detail: { sessionsClosed, auditEntriesDeleted },
+      });
+    }
+
+    return {
+      sessionsClosed,
+      auditEntriesDeleted,
+      vacuumed: true,
+      durationMs: Date.now() - startMs,
+    };
+  }
+
+  // ── Backup ──
+
+  /**
+   * Create a backup of the vault + database.
+   * Returns the backup filename and path.
+   */
+  createBackup(options?: { backupDir?: string; maxBackups?: number }): {
+    filename: string;
+    path: string;
+    vaultFiles: number;
+    sizeBytes: number;
+  } {
+    const backupDir = options?.backupDir ?? join(dirname(this.config.dbPath), 'backups');
+    const maxBackups = options?.maxBackups ?? 10;
+
+    mkdirSync(backupDir, { recursive: true });
+
+    // Generate timestamped filename
+    const now = new Date();
+    const ts = now.toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+    const filename = `ved-backup-${ts}.tar.gz`;
+    const backupPath = join(backupDir, filename);
+
+    // Create temp staging directory
+    const stagingDir = join(backupDir, `.staging-${Date.now()}`);
+    mkdirSync(join(stagingDir, 'vault'), { recursive: true });
+
+    try {
+      // Copy vault files
+      const vaultFiles = this._copyDir(this.config.memory.vaultPath, join(stagingDir, 'vault'));
+
+      // Copy database (safe: WAL checkpoint first)
+      if (this.db) {
+        this.db.pragma('wal_checkpoint(TRUNCATE)');
+      }
+      copyFileSync(this.config.dbPath, join(stagingDir, 'ved.db'));
+
+      // Create tar.gz
+      execSync(`tar -czf "${backupPath}" -C "${stagingDir}" .`, { stdio: 'pipe' });
+
+      // Get size
+      const sizeBytes = statSync(backupPath).size;
+
+      // Audit log
+      if (this.initialized) {
+        this.eventLoop.audit.append({
+          eventType: 'backup_created',
+          actor: 'ved',
+          detail: { filename, vaultFiles, sizeBytes, backupDir },
+        });
+      }
+
+      // Rotate old backups
+      this._rotateBackups(backupDir, maxBackups);
+
+      return { filename, path: backupPath, vaultFiles, sizeBytes };
+    } finally {
+      // Clean up staging
+      rmSync(stagingDir, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * List existing backups.
+   */
+  listBackups(backupDir?: string): {
+    filename: string;
+    path: string;
+    sizeBytes: number;
+    createdAt: Date;
+  }[] {
+    const dir = backupDir ?? join(dirname(this.config.dbPath), 'backups');
+    if (!existsSync(dir)) return [];
+
+    return readdirSync(dir)
+      .filter(f => f.startsWith('ved-backup-') && f.endsWith('.tar.gz'))
+      .map(f => {
+        const fullPath = join(dir, f);
+        const stat = statSync(fullPath);
+        return {
+          filename: f,
+          path: fullPath,
+          sizeBytes: stat.size,
+          createdAt: stat.mtime,
+        };
+      })
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  }
+
+  /**
+   * Restore vault + database from a backup archive.
+   * WARNING: This overwrites the current vault and database.
+   */
+  restoreBackup(backupPath: string, options?: { dryRun?: boolean }): {
+    vaultFiles: number;
+    dbRestored: boolean;
+  } {
+    if (!existsSync(backupPath)) {
+      throw new VedError('BACKUP_NOT_FOUND', `Backup not found: ${backupPath}`);
+    }
+
+    // Extract to temp dir to inspect
+    const extractDir = join(dirname(backupPath), `.restore-${Date.now()}`);
+    mkdirSync(extractDir, { recursive: true });
+
+    try {
+      execSync(`tar -xzf "${backupPath}" -C "${extractDir}"`, { stdio: 'pipe' });
+
+      // Validate contents
+      const hasVault = existsSync(join(extractDir, 'vault'));
+      const hasDb = existsSync(join(extractDir, 'ved.db'));
+
+      if (!hasVault && !hasDb) {
+        throw new VedError('BACKUP_INVALID', 'Backup archive contains neither vault nor database');
+      }
+
+      // Count vault files
+      let vaultFiles = 0;
+      if (hasVault) {
+        vaultFiles = this._countFiles(join(extractDir, 'vault'));
+      }
+
+      if (options?.dryRun) {
+        return { vaultFiles, dbRestored: hasDb };
+      }
+
+      // Restore vault
+      if (hasVault) {
+        // Clear existing vault contents (keep the directory)
+        const vaultPath = this.config.memory.vaultPath;
+        if (existsSync(vaultPath)) {
+          for (const entry of readdirSync(vaultPath)) {
+            if (entry === '.git') continue; // Preserve git history
+            rmSync(join(vaultPath, entry), { recursive: true, force: true });
+          }
+        } else {
+          mkdirSync(vaultPath, { recursive: true });
+        }
+        // Copy restored files
+        this._copyDir(join(extractDir, 'vault'), vaultPath);
+      }
+
+      // Restore database
+      if (hasDb) {
+        // Close current DB connection
+        if (this.db) {
+          this.db.close();
+          this.db = null;
+        }
+        copyFileSync(join(extractDir, 'ved.db'), this.config.dbPath);
+      }
+
+      // Audit log (re-open DB for this)
+      if (hasDb) {
+        this.db = new Database(this.config.dbPath);
+        this.db.pragma('journal_mode = WAL');
+      }
+
+      if (this.db) {
+        // Re-create audit with new DB
+        this.eventLoop.audit.reload(this.db);
+        this.eventLoop.audit.append({
+          eventType: 'backup_restored',
+          actor: 'ved',
+          detail: { source: basename(backupPath), vaultFiles, dbRestored: hasDb },
+        });
+      }
+
+      return { vaultFiles, dbRestored: hasDb };
+    } finally {
+      rmSync(extractDir, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * Recursively copy a directory. Returns file count.
+   */
+  private _copyDir(src: string, dest: string): number {
+    if (!existsSync(src)) return 0;
+    mkdirSync(dest, { recursive: true });
+    let count = 0;
+
+    for (const entry of readdirSync(src, { withFileTypes: true })) {
+      const srcPath = join(src, entry.name);
+      const destPath = join(dest, entry.name);
+
+      if (entry.name === '.git') continue; // Skip .git dirs
+
+      if (entry.isDirectory()) {
+        count += this._copyDir(srcPath, destPath);
+      } else {
+        copyFileSync(srcPath, destPath);
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Count files recursively in a directory.
+   */
+  private _countFiles(dir: string): number {
+    if (!existsSync(dir)) return 0;
+    let count = 0;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        count += this._countFiles(join(dir, entry.name));
+      } else {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Rotate backups: keep only the most recent maxBackups.
+   */
+  private _rotateBackups(backupDir: string, maxBackups: number): void {
+    const backups = this.listBackups(backupDir);
+    if (backups.length <= maxBackups) return;
+
+    // Delete oldest backups
+    const toDelete = backups.slice(maxBackups);
+    for (const b of toDelete) {
+      rmSync(b.path, { force: true });
+      log.info('Rotated old backup', { filename: b.filename });
+    }
+  }
+
+  // ── Cron ──
+
+  /**
+   * List all cron jobs.
+   */
+  cronList(): CronJob[] {
+    return this.cron.list();
+  }
+
+  /**
+   * Get a cron job by ID or name.
+   */
+  cronGet(idOrName: string): CronJob | null {
+    return this.cron.get(idOrName);
+  }
+
+  /**
+   * Add a new cron job.
+   */
+  cronAdd(input: CronJobInput): CronJob {
+    return this.cron.add(input);
+  }
+
+  /**
+   * Remove a cron job.
+   */
+  cronRemove(idOrName: string): boolean {
+    return this.cron.remove(idOrName);
+  }
+
+  /**
+   * Enable/disable a cron job.
+   */
+  cronToggle(idOrName: string, enabled: boolean): CronJob | null {
+    return this.cron.toggle(idOrName, enabled);
+  }
+
+  /**
+   * Manually run a cron job.
+   */
+  async cronRun(idOrName: string): Promise<CronRunResult> {
+    return this.cron.runNow(idOrName);
+  }
+
+  /**
+   * Get cron execution history.
+   */
+  cronHistory(jobName?: string, limit?: number): CronHistoryEntry[] {
+    return this.cron.history(jobName, limit);
+  }
+
+  /**
+   * Execute a cron job by type.
+   * Built-in types: backup, reindex, doctor.
+   */
+  private async executeCronJob(job: CronJob): Promise<CronRunResult> {
+    const startTime = Date.now();
+    const config = JSON.parse(job.jobConfig || '{}');
+
+    try {
+      switch (job.jobType) {
+        case 'backup': {
+          const result = this.createBackup({
+            backupDir: config.backupDir,
+            maxBackups: config.maxBackups,
+          });
+          return {
+            jobId: job.id,
+            jobName: job.name,
+            jobType: job.jobType,
+            success: true,
+            message: `Backup created: ${result.filename} (${result.vaultFiles} files, ${(result.sizeBytes / 1024 / 1024).toFixed(2)} MB)`,
+            durationMs: Date.now() - startTime,
+          };
+        }
+
+        case 'reindex': {
+          const stats = await this.reindexVault();
+          return {
+            jobId: job.id,
+            jobName: job.name,
+            jobType: job.jobType,
+            success: true,
+            message: `Re-indexed: ${stats.filesIndexed} files, ${stats.chunksStored} chunks, ${stats.graphEdges} edges`,
+            durationMs: Date.now() - startTime,
+          };
+        }
+
+        case 'doctor': {
+          const result = await this.doctor();
+          const ok = result.failed === 0;
+          return {
+            jobId: job.id,
+            jobName: job.name,
+            jobType: job.jobType,
+            success: ok,
+            message: `Doctor: ${result.passed} passed, ${result.warned} warnings, ${result.failed} failed`,
+            durationMs: Date.now() - startTime,
+            error: ok ? undefined : `${result.failed} check(s) failed`,
+          };
+        }
+
+        default:
+          return {
+            jobId: job.id,
+            jobName: job.name,
+            jobType: job.jobType,
+            success: false,
+            message: `Unknown job type: ${job.jobType}`,
+            durationMs: Date.now() - startTime,
+            error: `Unsupported job type: ${job.jobType}`,
+          };
+      }
+    } catch (err) {
+      return {
+        jobId: job.id,
+        jobName: job.name,
+        jobType: job.jobType,
+        success: false,
+        message: `Job failed: ${err instanceof Error ? err.message : String(err)}`,
+        durationMs: Date.now() - startTime,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
+   * Start the cron tick interval (checks for due jobs every 30s).
+   */
+  private startCronTick(): void {
+    this.cronTickInterval = setInterval(async () => {
+      try {
+        const executed = await this.cron.tick();
+        if (executed > 0) {
+          log.info('Cron tick executed jobs', { count: executed });
+        }
+      } catch (err) {
+        log.warn('Cron tick error', { error: err instanceof Error ? err.message : String(err) });
+      }
+    }, 30_000);
+    this.cronTickInterval.unref();
+    log.info('Cron tick started (30s interval)');
+  }
+
+  /**
+   * Stop the cron tick interval.
+   */
+  private stopCronTick(): void {
+    if (this.cronTickInterval) {
+      clearInterval(this.cronTickInterval);
+      this.cronTickInterval = null;
+    }
+  }
+
+  // ── Upgrade (Version Migration Management) ──
+
+  /**
+   * Get current schema version and available migration info.
+   */
+  getUpgradeStatus(): {
+    currentVersion: number;
+    availableVersions: number;
+    pendingCount: number;
+    dbPath: string;
+  } {
+    if (!this.db) throw new VedError('DB_OPEN_FAILED', 'Database not initialized');
+    const current = currentVersion(this.db);
+    // Count available migration files
+    const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), 'db', 'migrations');
+    const files = readdirSync(migrationsDir).filter(f => /^v\d{3}_.*\.sql$/.test(f));
+    const available = files.length;
+    return {
+      currentVersion: current,
+      availableVersions: available,
+      pendingCount: Math.max(0, available - current),
+      dbPath: this.config.dbPath,
+    };
+  }
+
+  /**
+   * Verify migration integrity (checksums of applied vs on-disk).
+   */
+  verifyMigrations(): string[] {
+    if (!this.db) throw new VedError('DB_OPEN_FAILED', 'Database not initialized');
+    return verifyMigrations(this.db);
+  }
+
+  /**
+   * Run pending migrations. Returns count applied.
+   * Migrations are already run on VedApp construction, so this is mainly
+   * for explicit CLI invocation after adding new migration files.
+   */
+  runMigrations(): number {
+    if (!this.db) throw new VedError('DB_OPEN_FAILED', 'Database not initialized');
+    return migrate(this.db);
+  }
+
+  /**
+   * Get details of all applied migrations from schema_version table.
+   */
+  getAppliedMigrations(): Array<{
+    version: number;
+    filename: string;
+    checksum: string;
+    appliedAt: number;
+    description: string;
+  }> {
+    if (!this.db) throw new VedError('DB_OPEN_FAILED', 'Database not initialized');
+    const tableExists = this.db.prepare(`
+      SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'
+    `).get();
+    if (!tableExists) return [];
+
+    return this.db.prepare(`
+      SELECT version, filename, checksum, applied_at as appliedAt, description
+      FROM schema_version ORDER BY version
+    `).all() as Array<{
+      version: number;
+      filename: string;
+      checksum: string;
+      appliedAt: number;
+      description: string;
+    }>;
+  }
+
+  // ── Watch (Standalone Vault Watcher) ──
+
+  /**
+   * Run vault watcher in standalone mode (no event loop, no channels).
+   * Watches vault files for changes and triggers RAG re-indexing.
+   * Blocks until stopped via signal.
+   */
+  async runWatch(): Promise<void> {
+    await this.init();
+
+    // Auto-commit dirty vault files
+    this.autoCommitVault();
+
+    // Index existing vault files
+    await this.indexVaultOnStartup();
+
+    // Start watcher
+    this.startVaultWatcher();
+
+    log.info('Vault watcher running in standalone mode (Ctrl+C to stop)');
+
+    // Block until shutdown signal
+    return new Promise<void>((resolve) => {
+      const shutdown = () => {
+        this.stopVaultWatcher();
+        resolve();
+      };
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
+    });
+  }
+
+  // ── Completions ──
+
+  /**
+   * Generate shell completions for bash, zsh, or fish.
+   */
+  static generateCompletions(shell: 'bash' | 'zsh' | 'fish'): string {
+    const commands = [
+      'init', 'start', 'run', 'status', 'stats', 'search', 'reindex',
+      'config', 'export', 'import', 'history', 'doctor', 'backup', 'cron',
+      'completions', 'upgrade', 'watch', 'plugin', 'gc', 'version',
+    ];
+    const configSubs = ['validate', 'show', 'path'];
+    const backupSubs = ['create', 'list', 'restore'];
+    const cronSubs = ['list', 'add', 'remove', 'enable', 'disable', 'run', 'history'];
+    const upgradeSubs = ['status', 'run', 'verify', 'history'];
+    const pluginSubs = ['list', 'tools', 'test', 'add', 'remove'];
+    const gcSubs = ['run', 'status'];
+
+    switch (shell) {
+      case 'bash':
+        return `# Ved bash completions — add to ~/.bashrc or ~/.bash_completion
+_ved_completions() {
+  local cur prev cmds
+  COMPREPLY=()
+  cur="\${COMP_WORDS[COMP_CWORD]}"
+  prev="\${COMP_WORDS[COMP_CWORD-1]}"
+  cmds="${commands.join(' ')}"
+
+  case "\${prev}" in
+    config)
+      COMPREPLY=( $(compgen -W "${configSubs.join(' ')}" -- "\${cur}") )
+      return 0
+      ;;
+    backup)
+      COMPREPLY=( $(compgen -W "${backupSubs.join(' ')}" -- "\${cur}") )
+      return 0
+      ;;
+    cron)
+      COMPREPLY=( $(compgen -W "${cronSubs.join(' ')}" -- "\${cur}") )
+      return 0
+      ;;
+    upgrade)
+      COMPREPLY=( $(compgen -W "${upgradeSubs.join(' ')}" -- "\${cur}") )
+      return 0
+      ;;
+    plugin)
+      COMPREPLY=( $(compgen -W "${pluginSubs.join(' ')}" -- "\${cur}") )
+      return 0
+      ;;
+    gc)
+      COMPREPLY=( $(compgen -W "${gcSubs.join(' ')}" -- "\${cur}") )
+      return 0
+      ;;
+    restore)
+      COMPREPLY=( $(compgen -f -- "\${cur}") )
+      return 0
+      ;;
+    search)
+      COMPREPLY=( $(compgen -W "-n --limit --fts-only --verbose" -- "\${cur}") )
+      return 0
+      ;;
+    history)
+      COMPREPLY=( $(compgen -W "-n --limit --type --from --to --verify --types --json" -- "\${cur}") )
+      return 0
+      ;;
+    export)
+      COMPREPLY=( $(compgen -W "-o --output --pretty --include-audit --include-stats --folder" -- "\${cur}") )
+      return 0
+      ;;
+    import)
+      COMPREPLY=( $(compgen -f -W "--dry-run --merge --overwrite" -- "\${cur}") )
+      return 0
+      ;;
+  esac
+
+  if [[ \${COMP_CWORD} -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "\${cmds}" -- "\${cur}") )
+  fi
+
+  return 0
+}
+complete -F _ved_completions ved
+`;
+
+      case 'zsh':
+        return `#compdef ved
+# Ved zsh completions — add to fpath or source in ~/.zshrc
+
+_ved() {
+  local -a commands
+  commands=(
+    'init:Create ~/.ved/ with default config'
+    'start:Start Ved in interactive mode'
+    'run:Alias for start'
+    'status:Show health check'
+    'stats:Show vault/RAG/audit/session metrics'
+    'search:Search vault via RAG pipeline'
+    'reindex:Force full RAG re-index'
+    'config:Manage configuration'
+    'export:Export vault to JSON'
+    'import:Import vault from JSON'
+    'history:View audit history'
+    'doctor:Run self-diagnostics'
+    'backup:Vault + database snapshots'
+    'cron:Manage scheduled jobs'
+    'upgrade:Manage database migrations'
+    'watch:Watch vault for changes (standalone)'
+    'completions:Generate shell completions'
+    'version:Show version'
+  )
+
+  _arguments -C \\
+    '1:command:->cmd' \\
+    '*::arg:->args'
+
+  case \$state in
+    cmd)
+      _describe 'ved commands' commands
+      ;;
+    args)
+      case \$words[1] in
+        config)
+          _values 'subcommand' 'validate[Check config for errors]' 'show[Print resolved config]' 'path[Print config directory]'
+          ;;
+        backup)
+          _values 'subcommand' 'create[Create a new backup]' 'list[List existing backups]' 'restore[Restore from backup]'
+          ;;
+        cron)
+          _values 'subcommand' 'list[List scheduled jobs]' 'add[Add a job]' 'remove[Remove a job]' 'enable[Enable a job]' 'disable[Disable a job]' 'run[Manually trigger a job]' 'history[Show execution history]'
+          ;;
+        upgrade)
+          _values 'subcommand' 'status[Show migration status]' 'run[Apply pending migrations]' 'verify[Check migration integrity]' 'history[Show applied migrations]'
+          ;;
+        search)
+          _arguments \\
+            '-n[Max results]:number' \\
+            '--limit[Max results]:number' \\
+            '--fts-only[FTS search only]' \\
+            '--verbose[Show search metrics]' \\
+            '*:query'
+          ;;
+        history)
+          _arguments \\
+            '-n[Max entries]:number' \\
+            '--type[Filter by event type]:type' \\
+            '--from[Filter from date]:date' \\
+            '--to[Filter to date]:date' \\
+            '--verify[Verify hash chain]' \\
+            '--types[List event types]' \\
+            '--json[JSON output]'
+          ;;
+        export)
+          _arguments \\
+            '-o[Output file]:file:_files' \\
+            '--pretty[Pretty-print JSON]' \\
+            '--include-audit[Include audit entries]' \\
+            '--include-stats[Include stats]' \\
+            '--folder[Export single folder]:folder'
+          ;;
+        import)
+          _arguments \\
+            '--dry-run[Preview without writing]' \\
+            '--merge[Skip existing files]' \\
+            '--overwrite[Overwrite existing files]' \\
+            '*:file:_files'
+          ;;
+        restore)
+          _files -g '*.tar.gz'
+          ;;
+      esac
+      ;;
+  esac
+}
+
+_ved
+`;
+
+      case 'fish':
+        return `# Ved fish completions — save to ~/.config/fish/completions/ved.fish
+
+# Disable file completions by default
+complete -c ved -f
+
+# Top-level commands
+${commands.map(c => `complete -c ved -n '__fish_use_subcommand' -a '${c}'`).join('\n')}
+
+# config subcommands
+${configSubs.map(s => `complete -c ved -n '__fish_seen_subcommand_from config' -a '${s}'`).join('\n')}
+
+# backup subcommands
+${backupSubs.map(s => `complete -c ved -n '__fish_seen_subcommand_from backup' -a '${s}'`).join('\n')}
+
+# cron subcommands
+${cronSubs.map(s => `complete -c ved -n '__fish_seen_subcommand_from cron' -a '${s}'`).join('\n')}
+
+# upgrade subcommands
+${upgradeSubs.map(s => `complete -c ved -n '__fish_seen_subcommand_from upgrade' -a '${s}'`).join('\n')}
+
+# search flags
+complete -c ved -n '__fish_seen_subcommand_from search' -s n -l limit -d 'Max results'
+complete -c ved -n '__fish_seen_subcommand_from search' -l fts-only -d 'FTS search only'
+complete -c ved -n '__fish_seen_subcommand_from search' -s v -l verbose -d 'Show metrics'
+
+# history flags
+complete -c ved -n '__fish_seen_subcommand_from history' -s n -l limit -d 'Max entries'
+complete -c ved -n '__fish_seen_subcommand_from history' -s t -l type -d 'Filter by event type'
+complete -c ved -n '__fish_seen_subcommand_from history' -l from -d 'From date'
+complete -c ved -n '__fish_seen_subcommand_from history' -l to -d 'To date'
+complete -c ved -n '__fish_seen_subcommand_from history' -l verify -d 'Verify chain'
+complete -c ved -n '__fish_seen_subcommand_from history' -l types -d 'List event types'
+complete -c ved -n '__fish_seen_subcommand_from history' -l json -d 'JSON output'
+
+# export flags
+complete -c ved -n '__fish_seen_subcommand_from export' -s o -l output -d 'Output file' -F
+complete -c ved -n '__fish_seen_subcommand_from export' -l pretty -d 'Pretty-print'
+complete -c ved -n '__fish_seen_subcommand_from export' -l include-audit -d 'Include audit'
+complete -c ved -n '__fish_seen_subcommand_from export' -l include-stats -d 'Include stats'
+complete -c ved -n '__fish_seen_subcommand_from export' -l folder -d 'Single folder'
+
+# import flags
+complete -c ved -n '__fish_seen_subcommand_from import' -l dry-run -d 'Preview only'
+complete -c ved -n '__fish_seen_subcommand_from import' -l merge -d 'Skip existing'
+complete -c ved -n '__fish_seen_subcommand_from import' -l overwrite -d 'Overwrite existing'
+
+# backup flags
+complete -c ved -n '__fish_seen_subcommand_from backup; and __fish_seen_subcommand_from create' -s d -l dir -d 'Backup directory'
+complete -c ved -n '__fish_seen_subcommand_from backup; and __fish_seen_subcommand_from create' -s n -l max -d 'Max backups to keep'
+complete -c ved -n '__fish_seen_subcommand_from backup; and __fish_seen_subcommand_from restore' -F
+`;
+
+      default:
+        throw new Error(`Unknown shell: ${shell}`);
+    }
   }
 
   // ── Vault Indexing ──

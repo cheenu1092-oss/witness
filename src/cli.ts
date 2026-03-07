@@ -12,7 +12,7 @@
 
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { createApp } from './app.js';
+import { createApp, VedApp } from './app.js';
 import { getConfigDir, loadConfig, validateConfig } from './core/config.js';
 import { createLogger } from './core/log.js';
 import type { MergedResult } from './rag/types.js';
@@ -51,12 +51,26 @@ async function main(): Promise<void> {
       return history(args.slice(1));
     case 'doctor':
       return doctor();
+    case 'backup':
+      return backup(args.slice(1));
+    case 'cron':
+      return cron(args.slice(1));
+    case 'upgrade':
+      return upgrade(args.slice(1));
+    case 'watch':
+      return watch();
+    case 'plugin':
+      return plugin(args.slice(1));
+    case 'gc':
+      return gc(args.slice(1));
+    case 'completions':
+      return completions(args.slice(1));
     case 'start':
     case 'run':
       return start();
     default:
       console.error(`Unknown command: ${command}`);
-      console.log('Usage: ved [init|start|status|stats|search|reindex|config|export|import|history|doctor|version]');
+      console.log('Usage: ved [init|start|status|stats|search|reindex|config|export|import|history|doctor|backup|cron|upgrade|watch|plugin|gc|completions|version]');
       process.exit(1);
   }
 }
@@ -836,6 +850,1071 @@ async function doctor(): Promise<void> {
   } catch (err) {
     console.error(`Doctor failed: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
+  }
+}
+
+/**
+ * Vault + database backup management.
+ *
+ * Usage:
+ *   ved backup              — Create a new backup (default)
+ *   ved backup create       — Create a new backup
+ *   ved backup list         — List existing backups
+ *   ved backup restore <file> — Restore from a backup
+ *   ved backup create -d <dir> — Custom backup directory
+ *   ved backup create -n 5  — Keep max 5 backups
+ */
+async function backup(args: string[]): Promise<void> {
+  const sub = args[0] ?? 'create';
+
+  switch (sub) {
+    case 'create': {
+      let backupDir: string | undefined;
+      let maxBackups: number | undefined;
+
+      for (let i = 1; i < args.length; i++) {
+        if ((args[i] === '-d' || args[i] === '--dir') && args[i + 1]) {
+          backupDir = args[i + 1];
+          i++;
+        } else if ((args[i] === '-n' || args[i] === '--max') && args[i + 1]) {
+          maxBackups = parseInt(args[i + 1], 10);
+          if (isNaN(maxBackups) || maxBackups <= 0) {
+            console.error('Error: -n must be a positive integer');
+            process.exit(1);
+          }
+          i++;
+        } else {
+          console.error(`Unknown backup create flag: ${args[i]}`);
+          process.exit(1);
+        }
+      }
+
+      try {
+        const app = createApp();
+        await app.init();
+
+        console.log(`\nVed v${VERSION} — Backup\n`);
+        console.log('  Creating backup...');
+
+        const startTime = Date.now();
+        const result = app.createBackup({ backupDir, maxBackups });
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        const sizeMB = (result.sizeBytes / (1024 * 1024)).toFixed(2);
+
+        console.log(`\n  ✅ Backup created in ${elapsed}s\n`);
+        console.log(`  File:        ${result.filename}`);
+        console.log(`  Path:        ${result.path}`);
+        console.log(`  Vault files: ${result.vaultFiles}`);
+        console.log(`  Size:        ${sizeMB} MB`);
+        console.log('');
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Backup failed: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'list': {
+      try {
+        const app = createApp();
+        await app.init();
+
+        const backups = app.listBackups();
+
+        console.log(`\nVed v${VERSION} — Backups\n`);
+
+        if (backups.length === 0) {
+          console.log('  No backups found. Run `ved backup` to create one.\n');
+          await app.stop();
+          return;
+        }
+
+        for (let i = 0; i < backups.length; i++) {
+          const b = backups[i];
+          const sizeMB = (b.sizeBytes / (1024 * 1024)).toFixed(2);
+          const date = b.createdAt.toISOString().replace('T', ' ').slice(0, 19);
+          const label = i === 0 ? ' (latest)' : '';
+          console.log(`  ${i + 1}. ${b.filename}${label}`);
+          console.log(`     ${date}  ${sizeMB} MB`);
+        }
+
+        console.log(`\n  ${backups.length} backup(s) found.\n`);
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'restore': {
+      let backupPath: string | undefined;
+      let dryRun = false;
+
+      for (let i = 1; i < args.length; i++) {
+        if (args[i] === '--dry-run' || args[i] === '-n') {
+          dryRun = true;
+        } else if (!args[i].startsWith('-')) {
+          backupPath = args[i];
+        } else {
+          console.error(`Unknown restore flag: ${args[i]}`);
+          process.exit(1);
+        }
+      }
+
+      if (!backupPath) {
+        console.error('Usage: ved backup restore <backup-file> [--dry-run]');
+        process.exit(1);
+      }
+
+      try {
+        const app = createApp();
+        await app.init();
+
+        console.log(`\nVed v${VERSION} — Restore\n`);
+        console.log(`  Source: ${backupPath}`);
+        console.log(`  Mode:   ${dryRun ? 'DRY RUN (no changes)' : '⚠️  LIVE RESTORE'}`);
+        console.log('');
+
+        const result = app.restoreBackup(backupPath, { dryRun });
+
+        if (dryRun) {
+          console.log(`  Would restore:`);
+          console.log(`    Vault files:  ${result.vaultFiles}`);
+          console.log(`    Database:     ${result.dbRestored ? 'yes' : 'no'}`);
+          console.log('\n  Run without --dry-run to apply.\n');
+        } else {
+          console.log(`  ✅ Restore complete\n`);
+          console.log(`  Vault files: ${result.vaultFiles}`);
+          console.log(`  Database:    ${result.dbRestored ? 'restored' : 'not included'}`);
+          console.log('\n  ⚠️  Restart Ved to pick up restored data.\n');
+        }
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Restore failed: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    default:
+      console.error(`Unknown backup subcommand: ${sub}`);
+      console.log('Usage: ved backup [create|list|restore]');
+      process.exit(1);
+  }
+}
+
+/**
+ * Cron job management.
+ *
+ * Usage:
+ *   ved cron                               — List all jobs (default)
+ *   ved cron list                          — List all jobs
+ *   ved cron add <name> <schedule> <type>  — Add a scheduled job
+ *   ved cron remove <name>                 — Remove a job
+ *   ved cron enable <name>                 — Enable a disabled job
+ *   ved cron disable <name>                — Disable a job
+ *   ved cron run <name>                    — Manually trigger a job
+ *   ved cron history [name] [-n <limit>]   — Show execution history
+ *
+ * Job types: backup, reindex, doctor
+ *
+ * Examples:
+ *   ved cron add nightly-backup "0 2 * * *" backup
+ *   ved cron add weekly-reindex "0 3 * * 0" reindex
+ *   ved cron add daily-doctor "@daily" doctor
+ *   ved cron add hourly-backup "0 * * * *" backup --max-backups 24
+ */
+async function cron(args: string[]): Promise<void> {
+  const sub = args[0] ?? 'list';
+
+  switch (sub) {
+    case 'list': {
+      try {
+        const app = createApp();
+        await app.init();
+
+        const jobs = app.cronList();
+
+        console.log(`\nVed v${VERSION} — Cron Jobs\n`);
+
+        if (jobs.length === 0) {
+          console.log('  No cron jobs configured.\n');
+          console.log('  Add one with: ved cron add <name> "<schedule>" <type>');
+          console.log('  Types: backup, reindex, doctor\n');
+          console.log('  Examples:');
+          console.log('    ved cron add nightly-backup "0 2 * * *" backup');
+          console.log('    ved cron add weekly-reindex "0 3 * * 0" reindex\n');
+          await app.stop();
+          return;
+        }
+
+        for (const job of jobs) {
+          const status = job.enabled ? '✅' : '⏸️';
+          const lastRun = job.lastRun
+            ? new Date(job.lastRun).toISOString().replace('T', ' ').slice(0, 19)
+            : 'never';
+          const nextRun = job.nextRun
+            ? new Date(job.nextRun).toISOString().replace('T', ' ').slice(0, 19)
+            : 'n/a';
+          const lastResult = job.lastResult
+            ? (job.lastResult === 'success' ? '✅' : '❌')
+            : '—';
+
+          console.log(`  ${status} ${job.name} (${job.jobType})`);
+          console.log(`     Schedule:    ${job.schedule}`);
+          console.log(`     Last run:    ${lastRun} ${lastResult}`);
+          console.log(`     Next run:    ${nextRun}`);
+          console.log(`     Runs:        ${job.runCount}`);
+          if (job.lastError) {
+            console.log(`     Last error:  ${job.lastError}`);
+          }
+          console.log('');
+        }
+
+        console.log(`  ${jobs.length} job(s) configured.\n`);
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'add': {
+      // Parse: ved cron add <name> "<schedule>" <type> [--config-key value]
+      const name = args[1];
+      const schedule = args[2];
+      const jobType = args[3];
+
+      if (!name || !schedule || !jobType) {
+        console.error('Usage: ved cron add <name> "<schedule>" <type> [--max-backups <n>] [--backup-dir <dir>]');
+        console.error('\nTypes: backup, reindex, doctor');
+        console.error('\nExamples:');
+        console.error('  ved cron add nightly-backup "0 2 * * *" backup');
+        console.error('  ved cron add weekly-reindex "@weekly" reindex');
+        process.exit(1);
+      }
+
+      if (!['backup', 'reindex', 'doctor'].includes(jobType)) {
+        console.error(`Unknown job type: ${jobType}`);
+        console.error('Valid types: backup, reindex, doctor');
+        process.exit(1);
+      }
+
+      // Parse optional config flags
+      const jobConfig: Record<string, unknown> = {};
+      for (let i = 4; i < args.length; i++) {
+        if (args[i] === '--max-backups' && args[i + 1]) {
+          jobConfig.maxBackups = parseInt(args[i + 1], 10);
+          i++;
+        } else if (args[i] === '--backup-dir' && args[i + 1]) {
+          jobConfig.backupDir = args[i + 1];
+          i++;
+        } else {
+          console.error(`Unknown flag: ${args[i]}`);
+          process.exit(1);
+        }
+      }
+
+      try {
+        const app = createApp();
+        await app.init();
+
+        const job = app.cronAdd({ name, schedule, jobType, jobConfig });
+
+        console.log(`\nVed v${VERSION} — Cron Job Added\n`);
+        console.log(`  ✅ ${job.name}`);
+        console.log(`     Type:      ${job.jobType}`);
+        console.log(`     Schedule:  ${job.schedule}`);
+        if (job.nextRun) {
+          console.log(`     Next run:  ${new Date(job.nextRun).toISOString().replace('T', ' ').slice(0, 19)}`);
+        }
+        console.log('');
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'remove': {
+      const name = args[1];
+      if (!name) {
+        console.error('Usage: ved cron remove <name>');
+        process.exit(1);
+      }
+
+      try {
+        const app = createApp();
+        await app.init();
+
+        const removed = app.cronRemove(name);
+        if (removed) {
+          console.log(`\n  ✅ Removed cron job: ${name}\n`);
+        } else {
+          console.error(`  ❌ Cron job not found: ${name}`);
+          process.exit(1);
+        }
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'enable':
+    case 'disable': {
+      const name = args[1];
+      if (!name) {
+        console.error(`Usage: ved cron ${sub} <name>`);
+        process.exit(1);
+      }
+
+      try {
+        const app = createApp();
+        await app.init();
+
+        const enabled = sub === 'enable';
+        const job = app.cronToggle(name, enabled);
+
+        if (job) {
+          const icon = enabled ? '✅' : '⏸️';
+          console.log(`\n  ${icon} ${job.name} — ${enabled ? 'enabled' : 'disabled'}`);
+          if (job.nextRun) {
+            console.log(`     Next run: ${new Date(job.nextRun).toISOString().replace('T', ' ').slice(0, 19)}`);
+          }
+          console.log('');
+        } else {
+          console.error(`  ❌ Cron job not found: ${name}`);
+          process.exit(1);
+        }
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'run': {
+      const name = args[1];
+      if (!name) {
+        console.error('Usage: ved cron run <name>');
+        process.exit(1);
+      }
+
+      try {
+        const app = createApp();
+        await app.init();
+
+        console.log(`\nVed v${VERSION} — Manual Cron Run\n`);
+        console.log(`  Running: ${name}...`);
+
+        const result = await app.cronRun(name);
+        const icon = result.success ? '✅' : '❌';
+
+        console.log(`\n  ${icon} ${result.jobName} (${result.jobType})`);
+        console.log(`     Duration: ${result.durationMs}ms`);
+        console.log(`     Message:  ${result.message}`);
+        if (result.error) {
+          console.log(`     Error:    ${result.error}`);
+        }
+        console.log('');
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'history': {
+      let jobName: string | undefined;
+      let limit = 20;
+
+      for (let i = 1; i < args.length; i++) {
+        if ((args[i] === '-n' || args[i] === '--limit') && args[i + 1]) {
+          limit = parseInt(args[i + 1], 10);
+          if (isNaN(limit) || limit <= 0) {
+            console.error('Error: -n must be a positive integer');
+            process.exit(1);
+          }
+          i++;
+        } else if (!args[i].startsWith('-')) {
+          jobName = args[i];
+        } else {
+          console.error(`Unknown history flag: ${args[i]}`);
+          process.exit(1);
+        }
+      }
+
+      try {
+        const app = createApp();
+        await app.init();
+
+        const entries = app.cronHistory(jobName, limit);
+
+        console.log(`\nVed v${VERSION} — Cron History\n`);
+        if (jobName) console.log(`  Filter: ${jobName}\n`);
+
+        if (entries.length === 0) {
+          console.log('  No execution history found.\n');
+          await app.stop();
+          return;
+        }
+
+        for (const entry of entries) {
+          const ts = new Date(entry.startedAt).toISOString().replace('T', ' ').slice(0, 19);
+          const icon = entry.success ? '✅' : '❌';
+          const dur = entry.durationMs < 1000
+            ? `${entry.durationMs}ms`
+            : `${(entry.durationMs / 1000).toFixed(1)}s`;
+
+          console.log(`  ${ts}  ${icon} ${entry.jobName} (${entry.jobType})  ${dur}`);
+          if (entry.message) {
+            console.log(`    ${entry.message}`);
+          }
+          if (entry.error) {
+            console.log(`    ❌ ${entry.error}`);
+          }
+        }
+
+        console.log(`\n  ${entries.length} entries shown.\n`);
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    default:
+      console.error(`Unknown cron subcommand: ${sub}`);
+      console.log('Usage: ved cron [list|add|remove|enable|disable|run|history]');
+      process.exit(1);
+  }
+}
+
+/**
+ * Database migration management.
+ *
+ * Usage:
+ *   ved upgrade              — Show migration status (default)
+ *   ved upgrade status       — Show current version, pending migrations
+ *   ved upgrade run          — Auto-backup + apply pending migrations
+ *   ved upgrade verify       — Check migration file integrity (checksums)
+ *   ved upgrade history      — Show all applied migrations
+ */
+async function upgrade(args: string[]): Promise<void> {
+  const sub = args[0] ?? 'status';
+
+  switch (sub) {
+    case 'status': {
+      try {
+        const app = createApp();
+        const info = app.getUpgradeStatus();
+
+        console.log(`\nVed v${VERSION} — Migration Status\n`);
+        console.log(`  Schema version:  v${String(info.currentVersion).padStart(3, '0')}`);
+        console.log(`  Available:       ${info.availableVersions} migration(s)`);
+        console.log(`  Pending:         ${info.pendingCount}`);
+        console.log(`  Database:        ${info.dbPath}`);
+
+        if (info.pendingCount > 0) {
+          console.log(`\n  ⚠️  ${info.pendingCount} migration(s) pending. Run \`ved upgrade run\` to apply.\n`);
+        } else {
+          console.log(`\n  ✅ Database is up to date.\n`);
+        }
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'run': {
+      try {
+        const app = createApp();
+        const before = app.getUpgradeStatus();
+
+        if (before.pendingCount === 0) {
+          console.log(`\nVed v${VERSION} — Upgrade\n`);
+          console.log(`  ✅ Already at latest version (v${String(before.currentVersion).padStart(3, '0')}). Nothing to do.\n`);
+          await app.stop();
+          return;
+        }
+
+        console.log(`\nVed v${VERSION} — Upgrade\n`);
+        console.log(`  Current version: v${String(before.currentVersion).padStart(3, '0')}`);
+        console.log(`  Pending:         ${before.pendingCount} migration(s)`);
+        console.log('');
+
+        // Auto-backup before migration
+        console.log('  📦 Creating pre-upgrade backup...');
+        try {
+          const backup = app.createBackup({});
+          console.log(`  ✅ Backup saved: ${backup.filename}`);
+        } catch (backupErr) {
+          console.log(`  ⚠️  Backup failed: ${backupErr instanceof Error ? backupErr.message : String(backupErr)}`);
+          console.log('     Proceeding with migration anyway...');
+        }
+
+        console.log('');
+        console.log('  🔄 Applying migrations...');
+
+        // Migrations were already applied during VedApp construction,
+        // but call runMigrations() explicitly in case new files were added after construction
+        const applied = app.runMigrations();
+
+        const after = app.getUpgradeStatus();
+
+        console.log(`\n  ✅ Upgrade complete\n`);
+        console.log(`  Applied:  ${applied} migration(s)`);
+        console.log(`  Version:  v${String(after.currentVersion).padStart(3, '0')}`);
+        console.log('');
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Upgrade failed: ${err instanceof Error ? err.message : String(err)}`);
+        console.error('\nIf the database is corrupted, restore from backup:');
+        console.error('  ved backup list');
+        console.error('  ved backup restore <backup-file>');
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'verify': {
+      try {
+        const app = createApp();
+        const issues = app.verifyMigrations();
+
+        console.log(`\nVed v${VERSION} — Migration Integrity\n`);
+
+        if (issues.length === 0) {
+          console.log('  ✅ All applied migrations match on-disk files. No tampering detected.\n');
+        } else {
+          for (const issue of issues) {
+            console.log(`  ❌ ${issue}`);
+          }
+          console.log(`\n  ${issues.length} issue(s) found. Migration files may have been modified.\n`);
+          process.exit(1);
+        }
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'history': {
+      try {
+        const app = createApp();
+        const migrations = app.getAppliedMigrations();
+
+        console.log(`\nVed v${VERSION} — Migration History\n`);
+
+        if (migrations.length === 0) {
+          console.log('  No migrations applied yet.\n');
+          await app.stop();
+          return;
+        }
+
+        for (const m of migrations) {
+          const date = new Date(m.appliedAt).toISOString().replace('T', ' ').slice(0, 19);
+          const checksum = m.checksum ? m.checksum.slice(0, 12) + '…' : '(none)';
+          console.log(`  v${String(m.version).padStart(3, '0')}  ${m.filename}`);
+          console.log(`        Applied: ${date}  Checksum: ${checksum}`);
+        }
+
+        console.log(`\n  ${migrations.length} migration(s) applied.\n`);
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    default:
+      console.error(`Unknown upgrade subcommand: ${sub}`);
+      console.log('Usage: ved upgrade [status|run|verify|history]');
+      process.exit(1);
+  }
+}
+
+/**
+ * Standalone vault file watcher — watches for changes and triggers RAG re-indexing.
+ * Does NOT start the event loop or channel adapters.
+ *
+ * Usage: ved watch
+ */
+async function watch(): Promise<void> {
+  console.log(`\nVed v${VERSION} — Vault Watcher\n`);
+
+  try {
+    const app = createApp();
+
+    console.log('  Initializing...');
+    await app.init();
+
+    const stats = app.getStats();
+    console.log(`  Vault:     ${stats.vault.fileCount} files`);
+    console.log(`  RAG index: ${stats.rag.filesIndexed} indexed`);
+    console.log('');
+    console.log('  👁️  Watching vault for changes (Ctrl+C to stop)');
+    console.log('  File changes will trigger automatic RAG re-indexing.\n');
+
+    // Graceful shutdown on signal
+    const shutdown = async () => {
+      console.log('\n  Stopping watcher...');
+      await app.stop();
+      console.log('  Done.\n');
+      process.exit(0);
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+
+    // Run watcher (blocks until signal)
+    await app.runWatch();
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * Generate shell completions.
+ *
+ * Usage:
+ *   ved completions bash    — Print bash completions
+ *   ved completions zsh     — Print zsh completions
+ *   ved completions fish    — Print fish completions
+ */
+function completions(args: string[]): void {
+  const shell = args[0];
+
+  if (!shell || !['bash', 'zsh', 'fish'].includes(shell)) {
+    console.error('Usage: ved completions <bash|zsh|fish>');
+    console.log('\nInstall:');
+    console.log('  bash:  ved completions bash >> ~/.bashrc');
+    console.log('  zsh:   ved completions zsh > ~/.zfunc/_ved');
+    console.log('  fish:  ved completions fish > ~/.config/fish/completions/ved.fish');
+    process.exit(1);
+  }
+
+  console.log(VedApp.generateCompletions(shell as 'bash' | 'zsh' | 'fish'));
+}
+
+/**
+ * MCP server manager.
+ *
+ * Usage:
+ *   ved plugin                          — List configured MCP servers (default)
+ *   ved plugin list                     — List configured MCP servers
+ *   ved plugin tools [server-name]      — List discovered tools
+ *   ved plugin test <server-name>       — Connect and verify server
+ *   ved plugin add <name> --transport <stdio|http> [--command <cmd>] [--args <a> ...] [--url <url>] [--enabled]
+ *   ved plugin remove <name>            — Remove a server
+ */
+async function plugin(args: string[]): Promise<void> {
+  const sub = args[0] ?? 'list';
+
+  switch (sub) {
+    case 'list': {
+      try {
+        const app = createApp();
+        await app.init();
+
+        const servers = app.pluginList();
+
+        console.log(`\nVed v${VERSION} — MCP Plugins\n`);
+
+        if (servers.length === 0) {
+          console.log('  No MCP servers configured.\n');
+          console.log('  Add one with: ved plugin add <name> --transport stdio --command <cmd>');
+          console.log('  Or configure in ~/.ved/config.yaml under mcp.servers\n');
+          await app.stop();
+          return;
+        }
+
+        for (const s of servers) {
+          const stateIcon = s.state === 'ready' ? '✅'
+            : s.state === 'failed' ? '❌'
+            : s.state === 'connecting' ? '🔄'
+            : '⏸️';
+          const lastConn = s.lastConnected
+            ? new Date(s.lastConnected).toISOString().replace('T', ' ').slice(0, 19)
+            : 'never';
+
+          console.log(`  ${stateIcon} ${s.name} (${s.transport})`);
+          console.log(`     State:        ${s.state}`);
+          console.log(`     Tools:        ${s.toolCount}`);
+          console.log(`     Last connected: ${lastConn}`);
+          if (s.lastError) {
+            console.log(`     Last error:   ${s.lastError}`);
+          }
+          console.log('');
+        }
+
+        console.log(`  ${servers.length} server(s) configured.\n`);
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'tools': {
+      const serverName = args[1] && !args[1].startsWith('-') ? args[1] : undefined;
+
+      try {
+        const app = createApp();
+        await app.init();
+
+        const tools = app.pluginTools(serverName);
+
+        console.log(`\nVed v${VERSION} — MCP Tools${serverName ? ` (${serverName})` : ''}\n`);
+
+        if (tools.length === 0) {
+          if (serverName) {
+            console.log(`  No tools found for server "${serverName}".\n`);
+            console.log('  Run `ved plugin test <server-name>` to verify connectivity.');
+          } else {
+            console.log('  No tools discovered. Run `ved init` to start.\n');
+          }
+          await app.stop();
+          return;
+        }
+
+        for (const t of tools) {
+          const desc = t.description.length > 60
+            ? t.description.slice(0, 57) + '…'
+            : t.description;
+          const riskIcon = t.riskLevel === 'low' ? '🟢'
+            : t.riskLevel === 'medium' ? '🟡'
+            : t.riskLevel === 'high' ? '🟠'
+            : '🔴';
+
+          console.log(`  ${riskIcon} ${t.name}`);
+          if (desc) console.log(`     ${desc}`);
+        }
+
+        console.log(`\n  ${tools.length} tool(s) found.\n`);
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'test': {
+      const serverName = args[1];
+      if (!serverName) {
+        console.error('Usage: ved plugin test <server-name>');
+        process.exit(1);
+      }
+
+      try {
+        const app = createApp();
+        await app.init();
+
+        console.log(`\nVed v${VERSION} — Plugin Test\n`);
+        console.log(`  Testing: ${serverName}...`);
+
+        const result = await app.pluginTest(serverName);
+        const icon = result.success ? '✅' : '❌';
+
+        console.log(`\n  ${icon} ${result.serverName}`);
+        console.log(`     Duration: ${result.durationMs}ms`);
+        console.log(`     Tools:    ${result.toolCount}`);
+        if (result.tools.length > 0) {
+          console.log(`     Names:    ${result.tools.slice(0, 5).join(', ')}${result.tools.length > 5 ? '…' : ''}`);
+        }
+        if (result.error) {
+          console.log(`     Error:    ${result.error}`);
+        }
+        console.log('');
+
+        await app.stop();
+
+        if (!result.success) process.exit(1);
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'add': {
+      const name = args[1];
+      if (!name || name.startsWith('-')) {
+        console.error('Usage: ved plugin add <name> --transport <stdio|http> [--command <cmd>] [--args <a> ...] [--url <url>] [--enabled]');
+        process.exit(1);
+      }
+
+      let transport: 'stdio' | 'http' | undefined;
+      let command: string | undefined;
+      const cmdArgs: string[] = [];
+      let url: string | undefined;
+      let enabled = true;
+
+      for (let i = 2; i < args.length; i++) {
+        if ((args[i] === '--transport' || args[i] === '-t') && args[i + 1]) {
+          const t = args[i + 1];
+          if (t !== 'stdio' && t !== 'http') {
+            console.error(`Invalid transport: ${t}. Must be stdio or http`);
+            process.exit(1);
+          }
+          transport = t;
+          i++;
+        } else if ((args[i] === '--command' || args[i] === '-c') && args[i + 1]) {
+          command = args[i + 1];
+          i++;
+        } else if (args[i] === '--args') {
+          // Collect all remaining non-flag args as command args
+          i++;
+          while (i < args.length && !args[i].startsWith('--')) {
+            cmdArgs.push(args[i]);
+            i++;
+          }
+          i--; // back up since loop will increment
+        } else if (args[i] === '--url' && args[i + 1]) {
+          url = args[i + 1];
+          i++;
+        } else if (args[i] === '--enabled') {
+          enabled = true;
+        } else if (args[i] === '--disabled') {
+          enabled = false;
+        } else {
+          console.error(`Unknown plugin add flag: ${args[i]}`);
+          process.exit(1);
+        }
+      }
+
+      if (!transport) {
+        console.error('--transport is required (stdio or http)');
+        process.exit(1);
+      }
+      if (transport === 'stdio' && !command) {
+        console.error('--command is required for stdio transport');
+        process.exit(1);
+      }
+      if (transport === 'http' && !url) {
+        console.error('--url is required for http transport');
+        process.exit(1);
+      }
+
+      try {
+        const app = createApp();
+        await app.init();
+
+        await app.pluginAdd({
+          name,
+          transport,
+          command,
+          args: cmdArgs.length > 0 ? cmdArgs : undefined,
+          url,
+          timeout: 30_000,
+          riskLevel: 'medium',
+          enabled,
+        });
+
+        console.log(`\n  ✅ Plugin "${name}" added (${transport})`);
+        console.log(`\n  ⚠️  Note: this is a runtime-only registration. It will not persist after restart.`);
+        console.log(`     To persist, add it to ~/.ved/config.yaml under mcp.servers\n`);
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'remove': {
+      const name = args[1];
+      if (!name) {
+        console.error('Usage: ved plugin remove <name>');
+        process.exit(1);
+      }
+
+      try {
+        const app = createApp();
+        await app.init();
+
+        const removed = await app.pluginRemove(name);
+        if (removed) {
+          console.log(`\n  ✅ Removed plugin: ${name}\n`);
+        } else {
+          console.error(`  ❌ Plugin not found: ${name}`);
+          process.exit(1);
+        }
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    default:
+      console.error(`Unknown plugin subcommand: ${sub}`);
+      console.log('Usage: ved plugin [list|tools|test|add|remove]');
+      process.exit(1);
+  }
+}
+
+/**
+ * Garbage collection — clean up stale sessions, compact database.
+ *
+ * Usage:
+ *   ved gc                               — Run all GC tasks (default)
+ *   ved gc run                           — Run all GC tasks
+ *   ved gc run [--dry-run] [--sessions-days <N>] [--audit-days <N>] [--force]
+ *   ved gc status                        — Show what would be cleaned
+ */
+async function gc(args: string[]): Promise<void> {
+  const sub = args[0] && !args[0].startsWith('-') ? args[0] : 'run';
+  const restArgs = (sub === 'run' || sub === 'status') ? args.slice(1) : args;
+
+  switch (sub) {
+    case 'status': {
+      try {
+        const app = createApp();
+        await app.init();
+
+        const sessionsDays = 30;
+        const auditDays = 90;
+        const status = app.gcStatus({ sessionsDays, auditDays });
+
+        console.log(`\nVed v${VERSION} — GC Status (what would be cleaned)\n`);
+        console.log(`  Sessions cutoff:   ${sessionsDays} days idle`);
+        console.log(`  Stale sessions:    ${status.staleSessions}`);
+        console.log('');
+        console.log(`  Audit cutoff:      ${auditDays} days`);
+        console.log(`  Old audit entries: ${status.oldAuditEntries}`);
+        if (status.auditWarning) {
+          console.log(`\n  ⚠️  ${status.auditWarning}`);
+        }
+        console.log('');
+        console.log('  Run `ved gc run` to clean up stale sessions and compact the database.');
+        console.log('');
+
+        await app.stop();
+      } catch (err) {
+        console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    case 'run': {
+      let dryRun = false;
+      let sessionsDays = 30;
+      let auditDays = 90;
+      let force = false;
+
+      for (let i = 0; i < restArgs.length; i++) {
+        if (restArgs[i] === '--dry-run' || restArgs[i] === '-n') {
+          dryRun = true;
+        } else if (restArgs[i] === '--force' || restArgs[i] === '-f') {
+          force = true;
+        } else if (restArgs[i] === '--sessions-days' && restArgs[i + 1]) {
+          sessionsDays = parseInt(restArgs[i + 1], 10);
+          if (isNaN(sessionsDays) || sessionsDays <= 0) {
+            console.error('Error: --sessions-days must be a positive integer');
+            process.exit(1);
+          }
+          i++;
+        } else if (restArgs[i] === '--audit-days' && restArgs[i + 1]) {
+          auditDays = parseInt(restArgs[i + 1], 10);
+          if (isNaN(auditDays) || auditDays <= 0) {
+            console.error('Error: --audit-days must be a positive integer');
+            process.exit(1);
+          }
+          i++;
+        } else {
+          console.error(`Unknown gc flag: ${restArgs[i]}`);
+          console.log('Usage: ved gc run [--dry-run] [--sessions-days <N>] [--audit-days <N>] [--force]');
+          process.exit(1);
+        }
+      }
+
+      // Warn if --audit-days used without --force
+      if (auditDays !== 90 && !force && !dryRun) {
+        console.log('\n  ⚠️  Warning: --audit-days changes the audit retention period.');
+        console.log('     Deleting audit entries breaks the hash chain.');
+        console.log('     Add --force to proceed with audit entry deletion.\n');
+      }
+
+      try {
+        const app = createApp();
+        await app.init();
+
+        console.log(`\nVed v${VERSION} — GC ${dryRun ? '(Dry Run)' : ''}\n`);
+
+        if (dryRun) {
+          const status = app.gcStatus({ sessionsDays, auditDays });
+          console.log(`  Stale sessions:    ${status.staleSessions} (>${sessionsDays} days idle)`);
+          console.log(`  Old audit entries: ${status.oldAuditEntries} (>${auditDays} days)`);
+          if (status.auditWarning) {
+            console.log(`\n  ⚠️  ${status.auditWarning}`);
+          }
+          console.log('\n  Run without --dry-run to apply.\n');
+          await app.stop();
+          return;
+        }
+
+        const startTime = Date.now();
+        const result = app.gcRun({
+          sessionsDays,
+          auditDays,
+          auditForce: force,
+        });
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+        console.log(`  ✅ GC complete in ${elapsed}s\n`);
+        console.log(`  Sessions closed:       ${result.sessionsClosed}`);
+        console.log(`  Audit entries deleted: ${result.auditEntriesDeleted}${!force ? ' (use --force to enable)' : ''}`);
+        console.log(`  Database vacuumed:     ${result.vacuumed ? 'yes' : 'no'}`);
+        console.log('');
+
+        await app.stop();
+      } catch (err) {
+        console.error(`GC failed: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
+
+    default:
+      console.error(`Unknown gc subcommand: ${sub}`);
+      console.log('Usage: ved gc [run|status]');
+      process.exit(1);
   }
 }
 

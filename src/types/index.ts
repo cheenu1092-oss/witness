@@ -175,6 +175,15 @@ export type AuditEventType =
   | 'work_order_resolved'
   | 'anchor_created'
   | 'config_change'
+  | 'backup_created'
+  | 'backup_restored'
+  | 'cron_job_created'
+  | 'cron_job_removed'
+  | 'cron_job_enabled'
+  | 'cron_job_disabled'
+  | 'cron_job_executed'
+  | 'gc_sessions_cleaned'
+  | 'gc_vacuum'
   | 'startup'
   | 'shutdown'
   | 'error';
@@ -187,7 +196,10 @@ export const AUDIT_EVENT_TYPES: AuditEventType[] = [
   'rag_reindex', 'rag_query',
   'session_start', 'session_close', 'session_idle',
   'trust_change', 'work_order_created', 'work_order_resolved',
-  'anchor_created', 'config_change', 'startup', 'shutdown', 'error',
+  'anchor_created', 'config_change', 'backup_created', 'backup_restored',
+  'cron_job_created', 'cron_job_removed', 'cron_job_enabled', 'cron_job_disabled', 'cron_job_executed',
+  'gc_sessions_cleaned', 'gc_vacuum',
+  'startup', 'shutdown', 'error',
 ];
 
 // === LLM ===

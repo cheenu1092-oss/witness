@@ -63,6 +63,10 @@ export type VedErrorCode =
   // Session
   | 'SESSION_NOT_FOUND'
   | 'SESSION_CLOSED'
+  // Backup
+  | 'BACKUP_NOT_FOUND'
+  | 'BACKUP_INVALID'
+  | 'BACKUP_RESTORE_FAILED'
   // General
   | 'INTERNAL_ERROR'
   | 'SHUTDOWN_ERROR';

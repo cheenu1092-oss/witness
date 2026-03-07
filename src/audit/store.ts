@@ -96,6 +96,48 @@ export class AuditLog {
   }
 
   /**
+   * Reload chain state from a (possibly replaced) database.
+   * Used after backup restore when the DB file changes.
+   */
+  reload(db: Database.Database): void {
+    // Update the DB reference
+    (this as any).db = db;
+
+    // Re-prepare statements against new DB handle
+    this.stmtInsert = db.prepare(`
+      INSERT INTO audit_log (id, timestamp, event_type, actor, session_id, detail, prev_hash, hash)
+      VALUES (@id, @timestamp, @eventType, @actor, @sessionId, @detail, @prevHash, @hash)
+    `);
+    this.stmtGetLatest = db.prepare(`
+      SELECT id, timestamp, event_type, actor, session_id, detail, prev_hash, hash
+      FROM audit_log ORDER BY timestamp DESC, id DESC LIMIT 1
+    `);
+    this.stmtCount = db.prepare(`SELECT COUNT(*) as n FROM audit_log`);
+    this.stmtGetRecent = db.prepare(`
+      SELECT id, timestamp, event_type, actor, session_id, detail, prev_hash, hash
+      FROM audit_log ORDER BY timestamp DESC, id DESC LIMIT @limit
+    `);
+    this.stmtGetRange = db.prepare(`
+      SELECT id, timestamp, event_type, actor, session_id, detail, prev_hash, hash
+      FROM audit_log WHERE timestamp >= @from AND timestamp <= @to ORDER BY timestamp ASC, id ASC
+    `);
+    this.stmtGetByType = db.prepare(`
+      SELECT id, timestamp, event_type, actor, session_id, detail, prev_hash, hash
+      FROM audit_log WHERE event_type = @eventType ORDER BY timestamp DESC, id DESC LIMIT @limit
+    `);
+    this.stmtGetForVerify = db.prepare(`
+      SELECT id, timestamp, event_type, actor, session_id, detail, prev_hash, hash
+      FROM audit_log ORDER BY timestamp ASC, id ASC LIMIT @limit
+    `);
+
+    // Reload chain state
+    this.lastHash = GENESIS_HASH;
+    this.lastId = '';
+    this.count = 0;
+    this.loadChainState();
+  }
+
+  /**
    * Append an audit entry to the log.
    * Computes hash, inserts atomically, updates in-memory chain state.
    * @returns The completed AuditEntry with computed hash.

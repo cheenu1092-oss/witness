@@ -41,11 +41,11 @@
 | 39+ | CYCLE | BUILD(2)/TEST(2)/RED-TEAM(2) |
 
 ## Current State
-- **Session Number:** 55
-- **Current Phase:** CYCLE (history + doctor CLI)
+- **Session Number:** 59
+- **Current Phase:** CYCLE (dedup + test coverage)
 - **Last Run:** 2026-03-06
 - **Cron ID:** cb0cd4f6-834e-42ea-a816-aecddc51ca2d
-- **Next Session:** 56 — Discord channel polish, `ved backup` (scheduled vault snapshots), or `ved completions` (shell completions)
+- **Next Session:** 60 — Push to GitHub, Discord channel polish, or new feature cycle
 
 ## Session Log
 (Sessions 1-20: see individual session files in sessions/)
@@ -91,6 +91,10 @@
 - **Session 53:** CYCLE — **`ved search` CLI + `ved config` CLI.** New `ved search` command queries RAG pipeline from CLI (FTS + vector + graph fusion, -n limit, --verbose, --fts-only flags). New `ved config` with subcommands: validate (checks config errors), show (prints resolved config with secrets redacted), path (prints config dir). CLI now has 8 commands. **30 new tests. 1026/1026 pass (host + Docker parity). 0 type errors.**
 - **Session 54:** CYCLE — **`ved export` + `ved import` CLI.** Export vault to portable JSON (with optional audit + stats). Import with merge/overwrite/fail modes, dry-run preview, stdin support. Path traversal protection on import. Round-trip integrity verified. CLI now has 10 commands. **23 new tests. 1030/1030 pass (host + Docker parity). 0 type errors.**
 - **Session 55:** CYCLE — **`ved history` + `ved doctor` CLI.** History: audit log viewer with type/date/limit filters, --verify chain integrity, --types listing, --json output. Doctor: 8-point self-diagnostics (config, database, vault structure, vault git, audit chain, RAG index, LLM, MCP tools). CLI now has 12 commands. **23 new tests. 1053/1053 pass (host + Docker parity). 0 type errors.**
+- **Session 56:** CYCLE — **`ved backup` + `ved completions` CLI.** Backup: create/list/restore vault+DB snapshots as tar.gz archives, auto-rotation (keep N), WAL checkpoint, .git preservation, audit-logged (backup_created/backup_restored). Completions: bash/zsh/fish shell completion generators covering all 14 commands + subcommands + flags. Added AuditLog.reload() for DB replacement after restore. CLI now has 14 commands. **23 new tests. 1076/1076 pass (host + Docker parity). 0 type errors.**
+- **Session 57:** CYCLE — **`ved cron` — scheduled job engine.** CronScheduler (420 lines): 5-field cron expression parser (wildcards, ranges, steps, lists, aliases), next-run calculator, SQLite-backed persistence (cron_jobs + cron_history tables), built-in job types (backup/reindex/doctor), tick-based execution (30s interval), manual trigger, enable/disable, execution history with timing, audit-logged (5 new event types). v002 migration adds last_result/last_error columns + cron_history table. CLI: 7 subcommands (list/add/remove/enable/disable/run/history). Shell completions updated. CLI now has 15 commands. **51 new tests. 1127/1127 pass (host + Docker parity). 0 type errors.**
+- **Session 58:** CYCLE — **`ved upgrade` + `ved watch` CLI.** Upgrade: 4 subcommands (status/run/verify/history) for database migration lifecycle — shows schema version, auto-backup before applying pending migrations, checksum integrity verification, migration history with applied dates. Watch: standalone vault file watcher — initializes + indexes vault, watches for changes, triggers RAG re-indexing, blocks until signal — no event loop or channels started. Shell completions updated for all 3 shells. CLI now has 17 commands. **22 new tests. 1149/1149 pass (Docker parity). 0 type errors.**
+- **Session 59:** CYCLE — **Dedup fix + GC/Plugin test coverage.** Fixed critical code duplication from S58: duplicate method definitions in app.ts (14 methods), cli.ts (4 functions), mcp/client.ts (4 methods). Removed ~646 lines of dead code. Eliminated 28 TypeScript errors (14 TS2393 duplicate + 4 property mismatch + 10 cascading). Kept properly-typed first set in app.ts, correctly-wired second set in cli.ts. Wrote 24 tests covering gcStatus (5), gcRun (6), pluginList (2), pluginTools (2), pluginAdd+Remove (3), pluginTest (1), dedup verification (5). **24 new tests. 1173/1173 pass (Docker parity). 0 type errors.**
 
 ## Phase Schedule (Updated)
 | Sessions | Phase | Description |
@@ -121,7 +125,11 @@
 | 53 | ✅ CYCLE | `ved search` CLI + `ved config` CLI (30 tests) |
 | 54 | ✅ CYCLE | `ved export` + `ved import` CLI (23 tests) |
 | 55 | ✅ CYCLE | `ved history` + `ved doctor` CLI (23 tests) |
-| 56+ | CYCLE | Discord polish, `ved backup`, shell completions |
+| 56 | ✅ CYCLE | `ved backup` + `ved completions` CLI (23 tests) |
+| 57 | ✅ CYCLE | `ved cron` — scheduled job engine (51 tests) |
+| 58 | ✅ CYCLE | `ved upgrade` + `ved watch` CLI (22 tests) |
+| 59 | ✅ CYCLE | Dedup fix + GC/Plugin test coverage (24 tests) |
+| 60+ | CYCLE | GitHub push, Discord polish, new features |
 
 ## Built Modules (Status)
 | Module | Status | LoC | Tests |
@@ -159,4 +167,8 @@
 | search+config S53 | ✅ Complete | ~250 | 30 |
 | export+import S54 | ✅ Complete | ~400 | 23 |
 | history+doctor S55 | ✅ Complete | ~450 | 23 |
-| **Total** | **ALL COMPLETE** | **~19,602** | **1053** |
+| backup+completions S56 | ✅ Complete | ~500 | 23 |
+| cron S57 | ✅ Complete | ~420 | 51 |
+| upgrade+watch S58 | ✅ Complete | ~310 | 22 |
+| dedup+gc+plugin S59 | ✅ Complete | -646 (dedup) | 24 |
+| **Total** | **ALL COMPLETE** | **~20,186** | **1173** |

@@ -240,6 +240,64 @@ export class MCPClient implements VedModule {
     return server.state === 'ready' && server.transport.connected;
   }
 
+  /**
+   * Register a new MCP server at runtime (not persisted to config.yaml).
+   * Throws if a server with that name already exists.
+   */
+  async addServer(config: MCPServerConfig): Promise<void> {
+    if (this.servers.has(config.name)) {
+      throw new VedError('INTERNAL_ERROR', `Server "${config.name}" already registered`);
+    }
+
+    const transport = createTransport(config);
+    this.servers.set(config.name, {
+      config,
+      transport,
+      state: 'idle',
+      tools: [],
+      reconnectAttempts: 0,
+    });
+  }
+
+  /**
+   * Remove an MCP server at runtime. Disconnects if connected.
+   * Returns true if removed, false if not found.
+   */
+  async removeServer(name: string): Promise<boolean> {
+    const server = this.servers.get(name);
+    if (!server) return false;
+
+    if (server.transport.connected) {
+      await server.transport.disconnect().catch(() => {});
+    }
+
+    // Remove this server's tools from index
+    for (const tool of server.tools) {
+      this.toolIndex.delete(tool.name);
+      this.toolToServer.delete(tool.name);
+    }
+    this._tools = this._tools.filter(t => t.serverName !== name);
+    this.servers.delete(name);
+    return true;
+  }
+
+  /**
+   * Test a server: connect, list tools, return results.
+   * Server remains connected after this call (disconnected via shutdown()).
+   */
+  async testServer(name: string): Promise<{ tools: MCPToolDefinition[]; connected: boolean }> {
+    const server = this.servers.get(name);
+    if (!server) {
+      throw new VedError('INTERNAL_ERROR', `Unknown server: "${name}"`);
+    }
+
+    await this.connectServer(name);
+    const raw = await server.transport.send('tools/list', {}) as MCPToolsListResult;
+    const tools = (raw?.tools ?? []).map((t: MCPRawTool) => this.mapTool(t, server.config));
+
+    return { tools, connected: server.transport.connected };
+  }
+
   /** Get info about all managed servers */
   getServers(): ServerInfo[] {
     return [...this.servers.values()].map(s => ({
