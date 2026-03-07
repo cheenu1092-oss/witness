@@ -20,12 +20,16 @@ export class AuditLog {
   private count: number = 0;
   private lastId: string = '';
 
+  // DB reference for dynamic queries
+  private readonly db: Database.Database;
+
   // Prepared statements
   private stmtInsert: Database.Statement;
   private stmtGetLatest: Database.Statement;
   private stmtGetRange: Database.Statement;
   private stmtGetByType: Database.Statement;
   private stmtGetForVerify: Database.Statement;
+  private stmtGetRecent: Database.Statement;
   private stmtCount: Database.Statement;
 
   /**
@@ -33,6 +37,8 @@ export class AuditLog {
    * Loads current chain state from DB on construction.
    */
   constructor(db: Database.Database) {
+    this.db = db;
+
     this.stmtInsert = db.prepare(`
       INSERT INTO audit_log (id, timestamp, event_type, actor, session_id, detail, prev_hash, hash)
       VALUES (@id, @timestamp, @eventType, @actor, @sessionId, @detail, @prevHash, @hash)
@@ -64,6 +70,13 @@ export class AuditLog {
       SELECT id, timestamp, event_type, actor, session_id, detail, prev_hash, hash
       FROM audit_log
       ORDER BY timestamp ASC, id ASC
+      LIMIT @limit
+    `);
+
+    this.stmtGetRecent = db.prepare(`
+      SELECT id, timestamp, event_type, actor, session_id, detail, prev_hash, hash
+      FROM audit_log
+      ORDER BY timestamp DESC, id DESC
       LIMIT @limit
     `);
 
@@ -184,6 +197,56 @@ export class AuditLog {
       id: this.lastId,
       count: this.count,
     };
+  }
+
+  /**
+   * Get the N most recent entries, newest first.
+   */
+  getRecent(limit: number): AuditEntry[] {
+    const n = Math.max(1, limit);
+    return (this.stmtGetRecent.all({ limit: n }) as RawRow[]).map(rowToEntry);
+  }
+
+  /**
+   * Get all entries in chain order (oldest first).
+   */
+  getAll(limit?: number): AuditEntry[] {
+    return (this.stmtGetForVerify.all({
+      limit: limit ?? 2_147_483_647,
+    }) as RawRow[]).map(rowToEntry);
+  }
+
+  /**
+   * Get filtered entries. Newest first. All filter params are optional.
+   */
+  getFiltered(options: { type?: string; from?: number; to?: number; limit?: number }): AuditEntry[] {
+    const limit = Math.max(1, options.limit ?? 50);
+    const conditions: string[] = [];
+    const params: Record<string, unknown> = { limit };
+
+    if (options.type) {
+      conditions.push('event_type = @type');
+      params['type'] = options.type;
+    }
+    if (options.from !== undefined) {
+      conditions.push('timestamp >= @from');
+      params['from'] = options.from;
+    }
+    if (options.to !== undefined) {
+      conditions.push('timestamp <= @to');
+      params['to'] = options.to;
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const sql = `
+      SELECT id, timestamp, event_type, actor, session_id, detail, prev_hash, hash
+      FROM audit_log
+      ${where}
+      ORDER BY timestamp DESC, id DESC
+      LIMIT @limit
+    `;
+
+    return (this.db.prepare(sql).all(params) as RawRow[]).map(rowToEntry);
   }
 }
 

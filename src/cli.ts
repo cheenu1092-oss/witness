@@ -47,12 +47,16 @@ async function main(): Promise<void> {
       return exportVault(args.slice(1));
     case 'import':
       return importVault(args.slice(1));
+    case 'history':
+      return history(args.slice(1));
+    case 'doctor':
+      return doctor();
     case 'start':
     case 'run':
       return start();
     default:
       console.error(`Unknown command: ${command}`);
-      console.log('Usage: ved [init|start|status|stats|search|reindex|config|export|import|version]');
+      console.log('Usage: ved [init|start|status|stats|search|reindex|config|export|import|history|doctor|version]');
       process.exit(1);
   }
 }
@@ -623,6 +627,214 @@ async function importVault(args: string[]): Promise<void> {
     await app.stop();
   } catch (err) {
     console.error(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * View audit history.
+ *
+ * Usage:
+ *   ved history                          — Show last 20 entries
+ *   ved history -n 50                    — Show last 50 entries
+ *   ved history --type tool_executed     — Filter by event type
+ *   ved history --from 2026-03-01        — Filter from date
+ *   ved history --to 2026-03-06          — Filter to date
+ *   ved history --verify                 — Verify hash chain integrity
+ *   ved history --types                  — List all event types in log
+ *   ved history --json                   — Output as JSON
+ */
+async function history(args: string[]): Promise<void> {
+  let limit = 20;
+  let type: string | undefined;
+  let fromDate: string | undefined;
+  let toDate: string | undefined;
+  let verify = false;
+  let listTypes = false;
+  let json = false;
+
+  for (let i = 0; i < args.length; i++) {
+    if ((args[i] === '-n' || args[i] === '--limit') && args[i + 1]) {
+      limit = parseInt(args[i + 1], 10);
+      if (isNaN(limit) || limit <= 0) {
+        console.error('Error: -n must be a positive integer');
+        process.exit(1);
+      }
+      i++;
+    } else if ((args[i] === '--type' || args[i] === '-t') && args[i + 1]) {
+      type = args[i + 1];
+      i++;
+    } else if (args[i] === '--from' && args[i + 1]) {
+      fromDate = args[i + 1];
+      i++;
+    } else if (args[i] === '--to' && args[i + 1]) {
+      toDate = args[i + 1];
+      i++;
+    } else if (args[i] === '--verify') {
+      verify = true;
+    } else if (args[i] === '--types') {
+      listTypes = true;
+    } else if (args[i] === '--json') {
+      json = true;
+    } else {
+      console.error(`Unknown history flag: ${args[i]}`);
+      console.log('Usage: ved history [-n <limit>] [--type <event_type>] [--from <date>] [--to <date>] [--verify] [--types] [--json]');
+      process.exit(1);
+    }
+  }
+
+  try {
+    const app = createApp();
+    await app.init();
+
+    // --types: list all event types
+    if (listTypes) {
+      const types = app.getAuditEventTypes();
+      console.log(`\nVed v${VERSION} — Audit Event Types\n`);
+      if (types.length === 0) {
+        console.log('  No entries in audit log.\n');
+      } else {
+        for (const t of types) {
+          console.log(`  • ${t}`);
+        }
+        console.log(`\n  ${types.length} type(s) found.\n`);
+      }
+      await app.stop();
+      return;
+    }
+
+    // --verify: check hash chain
+    if (verify) {
+      console.log(`\nVed v${VERSION} — Audit Chain Verification\n`);
+      const result = app.verifyAuditChain();
+      if (result.total === 0) {
+        console.log('  ℹ️  Audit log is empty.\n');
+      } else if (result.intact) {
+        console.log(`  ✅ Chain intact — ${result.total} entries verified.\n`);
+      } else {
+        console.log(`  ❌ Chain BROKEN at entry ${result.brokenAt} of ${result.total}.`);
+        console.log('     This indicates tampering or data corruption.\n');
+      }
+      await app.stop();
+      return;
+    }
+
+    // Parse date filters
+    const from = fromDate ? new Date(fromDate).getTime() : undefined;
+    const to = toDate ? (new Date(toDate).getTime() + 86400000 - 1) : undefined; // end of day
+
+    if (fromDate && (from === undefined || isNaN(from))) {
+      console.error(`Invalid --from date: ${fromDate}`);
+      process.exit(1);
+    }
+    if (toDate && (to === undefined || isNaN(to))) {
+      console.error(`Invalid --to date: ${toDate}`);
+      process.exit(1);
+    }
+
+    const entries = app.getHistory({ type, from, to, limit });
+
+    if (json) {
+      console.log(JSON.stringify(entries, null, 2));
+      await app.stop();
+      return;
+    }
+
+    console.log(`\nVed v${VERSION} — Audit History\n`);
+
+    if (type) console.log(`  Filter: type=${type}`);
+    if (fromDate) console.log(`  Filter: from=${fromDate}`);
+    if (toDate) console.log(`  Filter: to=${toDate}`);
+    if (type || fromDate || toDate) console.log('');
+
+    if (entries.length === 0) {
+      console.log('  No entries found.\n');
+      await app.stop();
+      return;
+    }
+
+    for (const entry of entries) {
+      const ts = new Date(entry.timestamp).toISOString().replace('T', ' ').slice(0, 19);
+      const session = entry.sessionId ? ` [${entry.sessionId.slice(0, 8)}…]` : '';
+
+      // Parse detail and show a compact preview
+      let detailPreview = '';
+      try {
+        const detail = JSON.parse(entry.detail);
+        // Show first 2 keys or a meaningful field
+        const keys = Object.keys(detail);
+        if (detail.tool) {
+          detailPreview = `tool=${detail.tool}`;
+        } else if (detail.content) {
+          detailPreview = detail.content.slice(0, 80) + (detail.content.length > 80 ? '…' : '');
+        } else if (keys.length > 0) {
+          detailPreview = keys.slice(0, 3).map(k => {
+            const v = detail[k];
+            const str = typeof v === 'string' ? v : JSON.stringify(v);
+            return `${k}=${str.slice(0, 40)}`;
+          }).join(', ');
+        }
+      } catch {
+        detailPreview = entry.detail.slice(0, 80);
+      }
+
+      console.log(`  ${ts}  ${entry.eventType.padEnd(22)} ${entry.actor.padEnd(8)}${session}`);
+      if (detailPreview) {
+        console.log(`    ${detailPreview}`);
+      }
+    }
+
+    console.log(`\n  Showing ${entries.length} entries (newest first). Use -n to see more.\n`);
+
+    await app.stop();
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * Run self-diagnostics.
+ *
+ * Usage: ved doctor
+ */
+async function doctor(): Promise<void> {
+  console.log(`\nVed v${VERSION} — Doctor\n`);
+
+  try {
+    const app = createApp();
+    await app.init();
+
+    const result = await app.doctor();
+
+    for (const check of result.checks) {
+      const icon = check.status === 'ok' ? '✅'
+        : check.status === 'warn' ? '⚠️'
+        : check.status === 'fail' ? '❌'
+        : 'ℹ️';
+      const fixHint = check.fixable ? ' (fixable)' : '';
+      console.log(`  ${icon} ${check.name}: ${check.message}${fixHint}`);
+    }
+
+    console.log('');
+    console.log(`  Summary: ${result.passed} passed, ${result.warned} warnings, ${result.failed} failed, ${result.infos} info`);
+
+    if (result.failed > 0) {
+      console.log('\n  ❌ Some checks failed. Address the issues above.\n');
+    } else if (result.warned > 0) {
+      console.log('\n  ⚠️  Some warnings. Ved will work but may not be fully operational.\n');
+    } else {
+      console.log('\n  🎉 All checks passed! Ved is healthy.\n');
+    }
+
+    await app.stop();
+
+    // Exit with non-zero if any checks failed
+    if (result.failed > 0) {
+      process.exit(1);
+    }
+  } catch (err) {
+    console.error(`Doctor failed: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
 }

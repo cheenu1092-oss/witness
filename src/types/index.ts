@@ -179,6 +179,17 @@ export type AuditEventType =
   | 'shutdown'
   | 'error';
 
+export const AUDIT_EVENT_TYPES: AuditEventType[] = [
+  'message_received', 'message_sent', 'llm_call', 'llm_response',
+  'tool_requested', 'tool_approved', 'tool_denied', 'tool_executed', 'tool_error',
+  'memory_t1_write', 'memory_t1_delete', 'memory_t2_compress',
+  'memory_t3_upsert', 'memory_t3_delete',
+  'rag_reindex', 'rag_query',
+  'session_start', 'session_close', 'session_idle',
+  'trust_change', 'work_order_created', 'work_order_resolved',
+  'anchor_created', 'config_change', 'startup', 'shutdown', 'error',
+];
+
 // === LLM ===
 
 export interface LLMDecision {

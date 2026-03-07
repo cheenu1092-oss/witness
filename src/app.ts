@@ -7,9 +7,9 @@
 
 import Database from 'better-sqlite3';
 import { mkdirSync, existsSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createLogger } from './core/log.js';
-import { loadConfig } from './core/config.js';
+import { loadConfig, validateConfig } from './core/config.js';
 import { migrate } from './db/migrate.js';
 import { EventLoop } from './core/event-loop.js';
 import { LLMClient } from './llm/client.js';
@@ -18,7 +18,7 @@ import { MemoryManager } from './memory/manager.js';
 import { VaultManager } from './memory/vault.js';
 import { RagPipeline } from './rag/pipeline.js';
 import { ChannelManager } from './channel/manager.js';
-import type { VedConfig, ModuleHealth, VaultFile } from './types/index.js';
+import type { VedConfig, ModuleHealth, VaultFile, AuditEntry } from './types/index.js';
 import type { IndexStats, RetrieveOptions, RetrievalContext } from './rag/types.js';
 import type { VaultExport, VaultExportFile, ExportOptions, ImportResult } from './export-types.js';
 
@@ -29,6 +29,21 @@ export interface VedAppOptions {
   configOverrides?: Partial<VedConfig>;
   /** Skip config validation (for testing) */
   skipValidation?: boolean;
+}
+
+export interface DoctorCheck {
+  name: string;
+  status: 'ok' | 'warn' | 'fail' | 'info';
+  message: string;
+  fixable?: boolean;
+}
+
+export interface DoctorResult {
+  checks: DoctorCheck[];
+  passed: number;
+  warned: number;
+  failed: number;
+  infos: number;
 }
 
 export class VedApp {
@@ -368,6 +383,281 @@ export class VedApp {
    */
   vaultFileExists(path: string): boolean {
     return this.memory.vault.exists(path);
+  }
+
+  // ── History ──
+
+  /**
+   * Get audit history entries for `ved history` CLI.
+   */
+  getHistory(options?: { type?: string; from?: number; to?: number; limit?: number }): AuditEntry[] {
+    return this.eventLoop.audit.getFiltered({
+      type: options?.type,
+      from: options?.from,
+      to: options?.to,
+      limit: options?.limit ?? 20,
+    });
+  }
+
+  /**
+   * Verify audit chain integrity for `ved history --verify`.
+   */
+  verifyAuditChain(limit?: number): { intact: boolean; brokenAt?: number; total: number } {
+    return this.eventLoop.audit.verifyChain(limit);
+  }
+
+  /**
+   * Get all unique event types present in the audit log.
+   */
+  getAuditEventTypes(): string[] {
+    if (!this.db) return [];
+    const rows = this.db.prepare(
+      'SELECT DISTINCT event_type FROM audit_log ORDER BY event_type'
+    ).all() as { event_type: string }[];
+    return rows.map(r => r.event_type);
+  }
+
+  // ── Doctor ──
+
+  /**
+   * Run self-diagnostics. Returns structured results for `ved doctor` CLI.
+   */
+  async doctor(): Promise<DoctorResult> {
+    const checks: DoctorCheck[] = [];
+
+    // 1. Config validity
+    try {
+      const errors = validateConfig(this.config);
+      if (errors.length === 0) {
+        checks.push({ name: 'Config', status: 'ok', message: 'Valid configuration' });
+      } else {
+        const required = errors.filter(e => e.code === 'REQUIRED');
+        const warnings = errors.filter(e => e.code !== 'REQUIRED');
+        if (required.length > 0) {
+          checks.push({
+            name: 'Config',
+            status: 'fail',
+            message: `${required.length} required field(s) missing: ${required.map(e => e.path).join(', ')}`,
+            fixable: true,
+          });
+        } else {
+          checks.push({
+            name: 'Config',
+            status: 'warn',
+            message: `${warnings.length} warning(s): ${warnings.map(e => e.path).join(', ')}`,
+          });
+        }
+      }
+    } catch (err) {
+      checks.push({
+        name: 'Config',
+        status: 'fail',
+        message: `Config load error: ${err instanceof Error ? err.message : String(err)}`,
+        fixable: true,
+      });
+    }
+
+    // 2. Database health
+    if (this.db) {
+      try {
+        const integrity = this.db.pragma('integrity_check') as { integrity_check: string }[];
+        const isOk = integrity.length === 1 && integrity[0].integrity_check === 'ok';
+        if (isOk) {
+          checks.push({ name: 'Database', status: 'ok', message: `SQLite OK (${this.config.dbPath})` });
+        } else {
+          checks.push({
+            name: 'Database',
+            status: 'fail',
+            message: `Integrity check failed: ${integrity.map(r => r.integrity_check).join('; ')}`,
+          });
+        }
+      } catch (err) {
+        checks.push({
+          name: 'Database',
+          status: 'fail',
+          message: `Database error: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    } else {
+      checks.push({ name: 'Database', status: 'fail', message: 'No database connection' });
+    }
+
+    // 3. Vault directory structure
+    const vaultPath = this.config.memory.vaultPath;
+    const expectedDirs = ['daily', 'entities', 'concepts', 'decisions'];
+    const missingDirs: string[] = [];
+    if (existsSync(vaultPath)) {
+      for (const dir of expectedDirs) {
+        if (!existsSync(join(vaultPath, dir))) {
+          missingDirs.push(dir);
+        }
+      }
+      if (missingDirs.length === 0) {
+        checks.push({ name: 'Vault structure', status: 'ok', message: `All 4 folders present (${vaultPath})` });
+      } else {
+        checks.push({
+          name: 'Vault structure',
+          status: 'warn',
+          message: `Missing folders: ${missingDirs.join(', ')}`,
+          fixable: true,
+        });
+      }
+    } else {
+      checks.push({
+        name: 'Vault structure',
+        status: 'fail',
+        message: `Vault path does not exist: ${vaultPath}`,
+        fixable: true,
+      });
+    }
+
+    // 4. Vault git status
+    try {
+      const git = this.memory.vault.git;
+      if (!git.isRepo) {
+        if (this.config.memory.gitEnabled) {
+          checks.push({
+            name: 'Vault git',
+            status: 'warn',
+            message: 'Git enabled in config but vault is not a git repo',
+            fixable: true,
+          });
+        } else {
+          checks.push({ name: 'Vault git', status: 'info', message: 'Git tracking disabled' });
+        }
+      } else if (git.isClean()) {
+        checks.push({ name: 'Vault git', status: 'ok', message: 'Clean working tree' });
+      } else {
+        checks.push({
+          name: 'Vault git',
+          status: 'warn',
+          message: `${git.dirtyCount} uncommitted file(s)`,
+        });
+      }
+    } catch (err) {
+      checks.push({
+        name: 'Vault git',
+        status: 'warn',
+        message: `Git check failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+
+    // 5. Audit chain integrity
+    try {
+      const chainHead = this.eventLoop.audit.getChainHead();
+      if (chainHead.count === 0) {
+        checks.push({ name: 'Audit chain', status: 'info', message: 'Empty chain (no entries yet)' });
+      } else {
+        // Verify last 100 entries for speed (full verify would be slow on large chains)
+        const verifyLimit = Math.min(chainHead.count, 100);
+        const result = this.eventLoop.audit.verifyChain(verifyLimit);
+        if (result.intact) {
+          checks.push({
+            name: 'Audit chain',
+            status: 'ok',
+            message: `${chainHead.count} entries, chain intact (verified last ${verifyLimit})`,
+          });
+        } else {
+          checks.push({
+            name: 'Audit chain',
+            status: 'fail',
+            message: `Chain broken at entry ${result.brokenAt} of ${result.total}`,
+          });
+        }
+      }
+    } catch (err) {
+      checks.push({
+        name: 'Audit chain',
+        status: 'fail',
+        message: `Audit check error: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+
+    // 6. RAG index health
+    try {
+      const ragStats = this.rag.stats();
+      const vaultFiles = this.memory.vault.listFiles();
+      const indexedCount = ragStats.filesIndexed;
+      const totalFiles = vaultFiles.length;
+
+      if (totalFiles === 0) {
+        checks.push({ name: 'RAG index', status: 'info', message: 'No vault files to index' });
+      } else if (indexedCount >= totalFiles) {
+        checks.push({
+          name: 'RAG index',
+          status: 'ok',
+          message: `${indexedCount}/${totalFiles} files indexed, ${ragStats.chunksStored} chunks`,
+        });
+      } else if (indexedCount > 0) {
+        checks.push({
+          name: 'RAG index',
+          status: 'warn',
+          message: `${indexedCount}/${totalFiles} files indexed (${totalFiles - indexedCount} stale). Run 'ved reindex'`,
+          fixable: true,
+        });
+      } else {
+        checks.push({
+          name: 'RAG index',
+          status: 'warn',
+          message: `Index empty with ${totalFiles} vault files. Run 'ved reindex'`,
+          fixable: true,
+        });
+      }
+    } catch (err) {
+      checks.push({
+        name: 'RAG index',
+        status: 'warn',
+        message: `RAG check failed: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+
+    // 7. LLM connectivity
+    try {
+      const llmHealth = await this.llm.healthCheck();
+      if (llmHealth.healthy) {
+        checks.push({ name: 'LLM', status: 'ok', message: llmHealth.details ?? 'Connected' });
+      } else {
+        checks.push({
+          name: 'LLM',
+          status: 'warn',
+          message: llmHealth.details ?? 'LLM health check failed',
+        });
+      }
+    } catch (err) {
+      checks.push({
+        name: 'LLM',
+        status: 'warn',
+        message: `LLM check error: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+
+    // 8. MCP tools
+    try {
+      const mcpHealth = await this.mcp.healthCheck();
+      if (mcpHealth.healthy) {
+        checks.push({ name: 'MCP tools', status: 'ok', message: mcpHealth.details ?? 'Connected' });
+      } else {
+        checks.push({
+          name: 'MCP tools',
+          status: 'info',
+          message: mcpHealth.details ?? 'No MCP servers configured',
+        });
+      }
+    } catch (err) {
+      checks.push({
+        name: 'MCP tools',
+        status: 'info',
+        message: `MCP check: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+
+    // Tally
+    const passed = checks.filter(c => c.status === 'ok').length;
+    const warned = checks.filter(c => c.status === 'warn').length;
+    const failed = checks.filter(c => c.status === 'fail').length;
+    const infos = checks.filter(c => c.status === 'info').length;
+
+    return { checks, passed, warned, failed, infos };
   }
 
   // ── Vault Indexing ──
