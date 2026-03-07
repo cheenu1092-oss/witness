@@ -41,11 +41,11 @@
 | 39+ | CYCLE | BUILD(2)/TEST(2)/RED-TEAM(2) |
 
 ## Current State
-- **Session Number:** 63
+- **Session Number:** 64
 - **Current Phase:** CYCLE (feature development)
 - **Last Run:** 2026-03-07
 - **Cron ID:** cb0cd4f6-834e-42ea-a816-aecddc51ca2d
-- **Next Session:** 64 — GitHub push (S63) + next feature (plugin system? notification channels? config hot-reload?)
+- **Next Session:** 65 — Next feature (config hot-reload? notification channels? `ved user` CLI?)
 
 ## Session Log
 (Sessions 1-20: see individual session files in sessions/)
@@ -99,6 +99,7 @@
 - **Session 61:** CYCLE — **`ved serve` — HTTP API server.** Built lightweight REST API on `node:http` (zero deps). 9 endpoints: health, stats, search (RAG), history (audit + chain verify), vault files/file, doctor, approve/deny work orders. Bearer token auth (optional), CORS, path traversal protection, input validation, proper HTTP status codes. CLI: `ved serve [--port] [--host] [--token] [--cors]`. Shell completions updated (all 3 shells). **56 new tests. 1229/1229 pass (host + Docker parity). 0 type errors. CLI: 18 commands.**
 - **Session 62:** CYCLE — **EventBus + SSE event stream.** Built typed pub/sub EventBus (subscribe with optional type filter, error isolation, clear). Added `onAppend` hook to AuditLog — every audit event auto-emits to bus. New `GET /api/events` SSE endpoint: real-time streaming with type filtering (`?types=`), 30s keepalive, auth, cleanup on disconnect/stop. Stats now include SSE connection count. Pushed S61 to GitHub (2b5d9f2). **30 new tests. 1278/1278 pass (host + Docker parity). 0 type errors.**
 - **Session 63:** CYCLE — **Webhook delivery + web dashboard.** WebhookManager (720 lines): EventBus→HTTP POST delivery with HMAC-SHA256 signing, exponential backoff retries (3 attempts), delivery log in SQLite, event type filtering, custom headers, payload/response caps. Dashboard (894 lines): self-contained SPA with 6 panels (overview/events/search/history/vault/doctor), live SSE stream, dark theme, responsive, token auth. HTTP API: 5 new webhook endpoints + 2 dashboard routes + DELETE method. CLI: `ved webhook` with 8 subcommands (list/add/remove/enable/disable/deliveries/stats/test). DB migration v003 (webhooks + webhook_deliveries tables). **43 new tests. 1321/1321 pass (host + Docker parity). 0 type errors. CLI: 19 commands.**
+- **Session 64:** CYCLE — **`ved memory` — CLI for Obsidian knowledge graph.** 8 subcommands: list (filter by type/tag/folder), show (entity details + frontmatter + links), graph (wikilink walk with depth), timeline (recent activity by date), daily (view/create daily notes), forget (soft-delete to archive), tags (tag counts), types (type counts). Aliases: mem, ls, cat, read, links, recent, today, archive. Shell completions updated (bash/zsh/fish). Pushed to GitHub (5e59758). **37 new tests. 1358/1358 pass (host + Docker parity). 0 type errors. CLI: 20 commands.**
 
 ## Phase Schedule (Updated)
 | Sessions | Phase | Description |
@@ -137,7 +138,8 @@
 | 61 | ✅ CYCLE | `ved serve` — HTTP API server (56 tests) |
 | 62 | ✅ CYCLE | EventBus + SSE event stream (30 tests) |
 | 63 | ✅ CYCLE | Webhook delivery + web dashboard (43 tests) |
-| 64+ | CYCLE | New features, polish, releases |
+| 64 | ✅ CYCLE | `ved memory` CLI (8 subcommands, 37 tests) |
+| 65+ | CYCLE | New features, polish, releases |
 
 ## Built Modules (Status)
 | Module | Status | LoC | Tests |
@@ -182,4 +184,5 @@
 | http-api S61 | ✅ Complete | ~370 | 56 |
 | event-bus+sse S62 | ✅ Complete | ~100 | 30 |
 | webhook+dashboard S63 | ✅ Complete | ~2,864 | 43 |
-| **Total** | **ALL COMPLETE** | **~23,520** | **1321** |
+| memory-cli S64 | ✅ Complete | ~942 | 37 |
+| **Total** | **ALL COMPLETE** | **~24,462** | **1358** |
