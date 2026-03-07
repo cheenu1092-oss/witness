@@ -22,6 +22,7 @@ import { createLogger } from './core/log.js';
 import type { VedApp } from './app.js';
 import type { AuditEventType } from './types/index.js';
 import type { Subscription } from './event-bus.js';
+import { getDashboardHtml } from './dashboard.js';
 
 const log = createLogger('http');
 
@@ -123,7 +124,7 @@ export class VedHttpServer {
   private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // CORS headers
     res.setHeader('Access-Control-Allow-Origin', this.config.corsOrigin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
     // Preflight
@@ -163,6 +164,7 @@ export class VedHttpServer {
 
     // GET routes
     if (method === 'GET') {
+      if (cleanPath === '/' || cleanPath === '/dashboard') return { handler: this.getDashboard, params: {} };
       if (cleanPath === '/api/health') return { handler: this.getHealth, params: {} };
       if (cleanPath === '/api/stats') return { handler: this.getStats, params: {} };
       if (cleanPath === '/api/search') return { handler: this.getSearch, params: {} };
@@ -171,10 +173,18 @@ export class VedHttpServer {
       if (cleanPath === '/api/vault/file') return { handler: this.getVaultFile, params: {} };
       if (cleanPath === '/api/doctor') return { handler: this.getDoctor, params: {} };
       if (cleanPath === '/api/events') return { handler: this.getEvents, params: {} };
+      if (cleanPath === '/api/webhooks') return { handler: this.getWebhooks, params: {} };
+      if (cleanPath === '/api/webhooks/stats') return { handler: this.getWebhookStats, params: {} };
+      // GET /api/webhooks/:id/deliveries
+      const whDelMatch = cleanPath.match(/^\/api\/webhooks\/(.+)\/deliveries$/);
+      if (whDelMatch) {
+        return { handler: this.getWebhookDeliveries, params: { id: decodeURIComponent(whDelMatch[1]) } };
+      }
     }
 
     // POST routes (with path params)
     if (method === 'POST') {
+      if (cleanPath === '/api/webhooks') return { handler: this.postWebhook, params: {} };
       const approveMatch = cleanPath.match(/^\/api\/approve\/(.+)$/);
       if (approveMatch) {
         return { handler: this.postApprove, params: { id: decodeURIComponent(approveMatch[1]) } };
@@ -185,10 +195,27 @@ export class VedHttpServer {
       }
     }
 
+    // DELETE routes
+    if (method === 'DELETE') {
+      const whDeleteMatch = cleanPath.match(/^\/api\/webhooks\/(.+)$/);
+      if (whDeleteMatch) {
+        return { handler: this.deleteWebhook, params: { id: decodeURIComponent(whDeleteMatch[1]) } };
+      }
+    }
+
     return null;
   }
 
   // ── Handlers ──
+
+  private getDashboard = async (_req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const html = getDashboardHtml('');
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-cache',
+    });
+    res.end(html);
+  };
 
   private getHealth = async (_req: IncomingMessage, res: ServerResponse): Promise<void> => {
     try {
@@ -407,6 +434,81 @@ export class VedHttpServer {
     });
 
     log.info('SSE client connected', { subId: sub.id, filter: filter ?? 'all' });
+  };
+
+  // ── Webhook Endpoints ──
+
+  private getWebhooks = async (_req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    try {
+      const webhooks = this.app.webhookList();
+      this.json(res, 200, { count: webhooks.length, webhooks });
+    } catch (err) {
+      this.json(res, 500, { error: this.errMsg(err) });
+    }
+  };
+
+  private getWebhookStats = async (_req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    try {
+      const stats = this.app.webhookStats();
+      this.json(res, 200, stats);
+    } catch (err) {
+      this.json(res, 500, { error: this.errMsg(err) });
+    }
+  };
+
+  private getWebhookDeliveries = async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>): Promise<void> => {
+    const webhookId = params.id;
+    const query = this.parseQuery(req.url ?? '');
+    const limit = parseInt(query.get('limit') ?? '20', 10);
+
+    try {
+      const deliveries = this.app.webhookDeliveries(webhookId, limit);
+      this.json(res, 200, { count: deliveries.length, deliveries });
+    } catch (err) {
+      this.json(res, 500, { error: this.errMsg(err) });
+    }
+  };
+
+  private postWebhook = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    try {
+      const body = await this.readBody(req);
+      if (!body || !body.name || !body.url) {
+        this.json(res, 400, { error: 'Missing required fields: name, url' });
+        return;
+      }
+
+      const webhook = this.app.webhookAdd({
+        name: body.name as string,
+        url: body.url as string,
+        secret: body.secret as string | undefined,
+        eventTypes: body.eventTypes as string[] | undefined,
+        metadata: body.metadata as Record<string, unknown> | undefined,
+      });
+
+      this.json(res, 201, webhook);
+    } catch (err) {
+      const msg = this.errMsg(err);
+      if (msg.includes('UNIQUE constraint')) {
+        this.json(res, 409, { error: `Webhook name already exists` });
+      } else {
+        this.json(res, 500, { error: msg });
+      }
+    }
+  };
+
+  private deleteWebhook = async (_req: IncomingMessage, res: ServerResponse, params: Record<string, string>): Promise<void> => {
+    const idOrName = params.id;
+
+    try {
+      const removed = this.app.webhookRemove(idOrName);
+      if (!removed) {
+        this.json(res, 404, { error: `Webhook not found: ${idOrName}` });
+        return;
+      }
+      this.json(res, 200, { removed: true, id: idOrName });
+    } catch (err) {
+      this.json(res, 500, { error: this.errMsg(err) });
+    }
   };
 
   private postApprove = async (req: IncomingMessage, res: ServerResponse, params: Record<string, string>): Promise<void> => {

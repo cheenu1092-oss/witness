@@ -574,9 +574,10 @@ describe('VedHttpServer', () => {
       expect(res.body.error).toBe('Not found');
     });
 
-    it('returns 404 for root path', async () => {
+    it('serves dashboard at root path', async () => {
       const res = await httpGet(port, '/');
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(200);
+      expect(res.body).toContain('Ved');
     });
 
     it('returns 404 for POST to GET-only endpoint', async () => {

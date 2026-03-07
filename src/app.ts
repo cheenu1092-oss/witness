@@ -27,6 +27,8 @@ import type { IndexStats, RetrieveOptions, RetrievalContext } from './rag/types.
 import type { VaultExport, VaultExportFile, ExportOptions, ImportResult } from './export-types.js';
 import type { MCPServerConfig, MCPToolDefinition, ServerInfo } from './mcp/types.js';
 import { EventBus } from './event-bus.js';
+import { WebhookManager } from './webhook.js';
+import type { Webhook, WebhookInput, WebhookDelivery, WebhookStats } from './webhook.js';
 
 const log = createLogger('app');
 
@@ -91,6 +93,7 @@ export class VedApp {
   readonly rag: RagPipeline;
   readonly channels: ChannelManager;
   readonly eventBus: EventBus;
+  readonly webhooks: WebhookManager;
 
   private initialized = false;
   private cronTickInterval: ReturnType<typeof setInterval> | null = null;
@@ -132,6 +135,9 @@ export class VedApp {
 
     // Wire audit → event bus (every audit append triggers bus emit)
     this.eventLoop.audit.onAppend = (entry) => this.eventBus.emitFromAudit(entry);
+
+    // Create webhook manager (delivers events to registered HTTP endpoints)
+    this.webhooks = new WebhookManager(this.db, this.eventBus);
 
     // Create cron scheduler
     this.cron = new CronScheduler(this.db);
@@ -206,6 +212,9 @@ export class VedApp {
     // Recalculate next_run for all jobs on startup (handles clock drift)
     this.cron.recalculateAll();
 
+    // Start webhook delivery (subscribes to EventBus)
+    this.webhooks.start();
+
     log.info('Ved is running');
 
     // Enter the main event loop (blocks)
@@ -217,6 +226,9 @@ export class VedApp {
    */
   async stop(): Promise<void> {
     log.info('Stopping Ved...');
+
+    // Stop webhook delivery
+    this.webhooks.stop();
 
     // Stop cron tick
     this.stopCronTick();
@@ -321,6 +333,36 @@ export class VedApp {
       throw new Error('VedApp not initialized — call init() first');
     }
     return this.rag.retrieve(query, options);
+  }
+
+  // ── Webhooks ──
+
+  webhookAdd(input: WebhookInput): Webhook {
+    return this.webhooks.add(input);
+  }
+
+  webhookRemove(idOrName: string): boolean {
+    return this.webhooks.remove(idOrName);
+  }
+
+  webhookGet(idOrName: string): Webhook | null {
+    return this.webhooks.get(idOrName);
+  }
+
+  webhookList(): Webhook[] {
+    return this.webhooks.list();
+  }
+
+  webhookToggle(idOrName: string, enabled: boolean): Webhook | null {
+    return this.webhooks.toggle(idOrName, enabled);
+  }
+
+  webhookDeliveries(webhookIdOrName?: string, limit?: number): WebhookDelivery[] {
+    return this.webhooks.deliveries(webhookIdOrName, limit);
+  }
+
+  webhookStats(): WebhookStats {
+    return this.webhooks.stats();
   }
 
   // ── Export / Import ──
@@ -1367,13 +1409,14 @@ export class VedApp {
     const commands = [
       'init', 'start', 'run', 'serve', 'status', 'stats', 'search', 'reindex',
       'config', 'export', 'import', 'history', 'doctor', 'backup', 'cron',
-      'completions', 'upgrade', 'watch', 'plugin', 'gc', 'version',
+      'completions', 'upgrade', 'watch', 'webhook', 'plugin', 'gc', 'version',
     ];
     const configSubs = ['validate', 'show', 'path'];
     const backupSubs = ['create', 'list', 'restore'];
     const cronSubs = ['list', 'add', 'remove', 'enable', 'disable', 'run', 'history'];
     const upgradeSubs = ['status', 'run', 'verify', 'history'];
     const pluginSubs = ['list', 'tools', 'test', 'add', 'remove'];
+    const webhookSubs = ['list', 'add', 'remove', 'enable', 'disable', 'deliveries', 'stats', 'test'];
     const gcSubs = ['run', 'status'];
 
     switch (shell) {
@@ -1409,6 +1452,10 @@ _ved_completions() {
       ;;
     gc)
       COMPREPLY=( $(compgen -W "${gcSubs.join(' ')}" -- "\${cur}") )
+      return 0
+      ;;
+    webhook)
+      COMPREPLY=( $(compgen -W "${webhookSubs.join(' ')}" -- "\${cur}") )
       return 0
       ;;
     restore)
@@ -1466,6 +1513,7 @@ _ved() {
     'cron:Manage scheduled jobs'
     'upgrade:Manage database migrations'
     'watch:Watch vault for changes (standalone)'
+    'webhook:Manage webhook event delivery'
     'completions:Generate shell completions'
     'version:Show version'
   )
@@ -1491,6 +1539,9 @@ _ved() {
           ;;
         upgrade)
           _values 'subcommand' 'status[Show migration status]' 'run[Apply pending migrations]' 'verify[Check migration integrity]' 'history[Show applied migrations]'
+          ;;
+        webhook)
+          _values 'subcommand' 'list[List webhooks]' 'add[Register a webhook]' 'remove[Remove a webhook]' 'enable[Enable a webhook]' 'disable[Disable a webhook]' 'deliveries[View delivery history]' 'stats[Delivery statistics]' 'test[Send a test event]'
           ;;
         serve)
           _arguments \\
@@ -1566,6 +1617,9 @@ ${cronSubs.map(s => `complete -c ved -n '__fish_seen_subcommand_from cron' -a '$
 
 # upgrade subcommands
 ${upgradeSubs.map(s => `complete -c ved -n '__fish_seen_subcommand_from upgrade' -a '${s}'`).join('\n')}
+
+# webhook subcommands
+${webhookSubs.map(s => `complete -c ved -n '__fish_seen_subcommand_from webhook' -a '${s}'`).join('\n')}
 
 # serve flags
 complete -c ved -n '__fish_seen_subcommand_from serve' -s p -l port -d 'Port'

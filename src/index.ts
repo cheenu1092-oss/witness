@@ -60,7 +60,10 @@ export type { HttpServerConfig } from './http.js';
 
 // Event Bus
 export { EventBus } from './event-bus.js';
+export { WebhookManager } from './webhook.js';
+export type { Webhook, WebhookInput, WebhookDelivery, WebhookStats } from './webhook.js';
 export type { VedEvent, EventSubscriber, Subscription } from './event-bus.js';
+export { getDashboardHtml } from './dashboard.js';
 
 // App
 export { VedApp, createApp } from './app.js';

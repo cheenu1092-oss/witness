@@ -64,6 +64,8 @@ async function main(): Promise<void> {
       return plugin(args.slice(1));
     case 'gc':
       return gc(args.slice(1));
+    case 'webhook':
+      return webhook(args.slice(1));
     case 'serve':
     case 'api':
       return serve(args.slice(1));
@@ -74,7 +76,7 @@ async function main(): Promise<void> {
       return start();
     default:
       console.error(`Unknown command: ${command}`);
-      console.log('Usage: ved [init|start|serve|status|stats|search|reindex|config|export|import|history|doctor|backup|cron|upgrade|watch|plugin|gc|completions|version]');
+      console.log('Usage: ved [init|start|serve|status|stats|search|reindex|config|export|import|history|doctor|backup|cron|upgrade|watch|webhook|plugin|gc|completions|version]');
       process.exit(1);
   }
 }
@@ -1919,6 +1921,225 @@ async function gc(args: string[]): Promise<void> {
       console.error(`Unknown gc subcommand: ${sub}`);
       console.log('Usage: ved gc [run|status]');
       process.exit(1);
+  }
+}
+
+/**
+ * Manage webhooks.
+ *
+ * Usage:
+ *   ved webhook list                           — List all webhooks
+ *   ved webhook add <name> <url> [--secret s] [--events e1,e2] — Register a webhook
+ *   ved webhook remove <name>                  — Remove a webhook
+ *   ved webhook enable <name>                  — Enable a webhook
+ *   ved webhook disable <name>                 — Disable a webhook
+ *   ved webhook deliveries [name] [--limit n]  — View delivery history
+ *   ved webhook stats                          — Delivery statistics
+ *   ved webhook test <name>                    — Send a test event
+ */
+async function webhook(args: string[]): Promise<void> {
+  const sub = args[0];
+
+  if (!sub || sub === '--help' || sub === '-h') {
+    console.log(`
+ved webhook — Manage webhook event delivery
+
+Subcommands:
+  list                                    List all registered webhooks
+  add <name> <url> [--secret s] [--events e1,e2]  Register a new webhook
+  remove <name|id>                        Remove a webhook
+  enable <name|id>                        Enable a disabled webhook
+  disable <name|id>                       Disable a webhook
+  deliveries [name|id] [--limit n]        View delivery history
+  stats                                   Show delivery statistics
+  test <name|id>                          Send a test event to verify delivery
+`.trim());
+    return;
+  }
+
+  const app = createApp();
+  await app.init();
+
+  try {
+    switch (sub) {
+      case 'list': {
+        const webhooks = app.webhookList();
+        if (webhooks.length === 0) {
+          console.log('No webhooks registered. Use "ved webhook add" to create one.');
+          return;
+        }
+        console.log(`\n  Webhooks (${webhooks.length}):\n`);
+        for (const wh of webhooks) {
+          const status = wh.enabled ? '✓' : '✗';
+          const types = wh.eventTypes.join(',');
+          const secret = wh.secret ? '🔑' : '';
+          console.log(`  ${status} ${wh.name} ${secret}`);
+          console.log(`    URL: ${wh.url}`);
+          console.log(`    Events: ${types}`);
+          console.log(`    ID: ${wh.id}`);
+          console.log();
+        }
+        break;
+      }
+
+      case 'add': {
+        const name = args[1];
+        const url = args[2];
+        if (!name || !url) {
+          console.error('Usage: ved webhook add <name> <url> [--secret <s>] [--events <e1,e2>]');
+          process.exit(1);
+        }
+
+        let secret: string | undefined;
+        let eventTypes: string[] | undefined;
+
+        for (let i = 3; i < args.length; i++) {
+          if ((args[i] === '--secret' || args[i] === '-s') && args[i + 1]) {
+            secret = args[++i];
+          } else if ((args[i] === '--events' || args[i] === '-e') && args[i + 1]) {
+            eventTypes = args[++i].split(',').map(s => s.trim()).filter(Boolean);
+          }
+        }
+
+        const wh = app.webhookAdd({ name, url, secret, eventTypes });
+        console.log(`✓ Webhook registered: ${wh.name}`);
+        console.log(`  ID: ${wh.id}`);
+        console.log(`  URL: ${wh.url}`);
+        console.log(`  Events: ${wh.eventTypes.join(',')}`);
+        if (wh.secret) console.log('  Signing: HMAC-SHA256 ✓');
+        break;
+      }
+
+      case 'remove': {
+        const target = args[1];
+        if (!target) {
+          console.error('Usage: ved webhook remove <name|id>');
+          process.exit(1);
+        }
+        const removed = app.webhookRemove(target);
+        if (removed) {
+          console.log(`✓ Webhook removed: ${target}`);
+        } else {
+          console.error(`Webhook not found: ${target}`);
+          process.exit(1);
+        }
+        break;
+      }
+
+      case 'enable': {
+        const target = args[1];
+        if (!target) { console.error('Usage: ved webhook enable <name|id>'); process.exit(1); }
+        const result = app.webhookToggle(target, true);
+        if (result) {
+          console.log(`✓ Webhook enabled: ${result.name}`);
+        } else {
+          console.error(`Webhook not found: ${target}`);
+          process.exit(1);
+        }
+        break;
+      }
+
+      case 'disable': {
+        const target = args[1];
+        if (!target) { console.error('Usage: ved webhook disable <name|id>'); process.exit(1); }
+        const result = app.webhookToggle(target, false);
+        if (result) {
+          console.log(`✓ Webhook disabled: ${result.name}`);
+        } else {
+          console.error(`Webhook not found: ${target}`);
+          process.exit(1);
+        }
+        break;
+      }
+
+      case 'deliveries': {
+        const target = args[1] && !args[1].startsWith('--') ? args[1] : undefined;
+        let limit = 20;
+        for (let i = target ? 2 : 1; i < args.length; i++) {
+          if ((args[i] === '--limit' || args[i] === '-n') && args[i + 1]) {
+            limit = parseInt(args[++i], 10);
+          }
+        }
+
+        const deliveries = app.webhookDeliveries(target, limit);
+        if (deliveries.length === 0) {
+          console.log('No deliveries found.');
+          return;
+        }
+
+        console.log(`\n  Deliveries (${deliveries.length}):\n`);
+        for (const d of deliveries) {
+          const statusIcon = d.status === 'success' ? '✓' : d.status === 'dead' ? '✗' : '…';
+          const time = new Date(d.startedAt).toISOString().slice(0, 19);
+          const dur = d.durationMs ? `${d.durationMs}ms` : '—';
+          const code = d.statusCode ? `HTTP ${d.statusCode}` : '';
+          console.log(`  ${statusIcon} [${time}] ${d.eventType} → ${d.status} ${code} (${dur}) attempt ${d.attempt}`);
+          if (d.error) console.log(`    Error: ${d.error}`);
+        }
+        break;
+      }
+
+      case 'stats': {
+        const stats = app.webhookStats();
+        console.log('\n  Webhook Stats:\n');
+        console.log(`  Webhooks:       ${stats.enabledWebhooks}/${stats.totalWebhooks} enabled`);
+        console.log(`  Pending:        ${stats.pendingDeliveries}`);
+        console.log(`  Failed:         ${stats.failedDeliveries}`);
+        console.log(`  Dead:           ${stats.deadDeliveries}`);
+        console.log(`  Success (24h):  ${stats.successfulLast24h}`);
+        break;
+      }
+
+      case 'test': {
+        const target = args[1];
+        if (!target) {
+          console.error('Usage: ved webhook test <name|id>');
+          process.exit(1);
+        }
+
+        const wh = app.webhookGet(target);
+        if (!wh) {
+          console.error(`Webhook not found: ${target}`);
+          process.exit(1);
+          return; // unreachable but helps TS
+        }
+
+        console.log(`Sending test event to ${wh.name} (${wh.url})...`);
+
+        // Emit a synthetic test event through the bus
+        app.eventBus.emit({
+          id: `test_${Date.now()}`,
+          timestamp: Date.now(),
+          type: 'startup' as any,
+          actor: 'ved-cli',
+          detail: { test: true, message: 'Webhook test delivery from ved CLI' },
+          hash: 'test',
+        });
+
+        // Wait a moment for async delivery
+        await new Promise(resolve => setTimeout(resolve, 3000));
+
+        const deliveries = app.webhookDeliveries(target, 1);
+        if (deliveries.length > 0) {
+          const d = deliveries[0];
+          if (d.status === 'success') {
+            console.log(`✓ Test delivered! HTTP ${d.statusCode} (${d.durationMs}ms)`);
+          } else {
+            console.log(`✗ Delivery ${d.status}: ${d.error ?? `HTTP ${d.statusCode}`}`);
+          }
+        } else {
+          console.log('⚠ No delivery recorded (webhook may not match event type filter)');
+        }
+        break;
+      }
+
+      default:
+        console.error(`Unknown webhook subcommand: ${sub}`);
+        console.log('Subcommands: list, add, remove, enable, disable, deliveries, stats, test');
+        process.exit(1);
+    }
+  } finally {
+    await app.stop();
   }
 }
 
